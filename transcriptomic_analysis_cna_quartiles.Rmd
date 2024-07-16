@@ -1,0 +1,1932 @@
+---
+title: "transcriptomic_analysis_cna_quartiles"
+author: "Evan_Naughton"
+date: "2024-05-21"
+output: html_document
+---
+
+**Carrying out replicative survival analysis & differential gene expression analysis on high and low CNA quartiles (Building on Eva's previous work)**
+
+Utilised data from TCGA-ACC Firehose Legacy on cBioportal first before realising that Eva obtained her data from TCGA PanCancer Atlas study on cBioportal which had DSS data available. The first part of this analysis is carried out on the Firehose Legacy data and the second part is carried out on PanCancer Atlas data.
+
+microRNA expression within each quartile was also analysed using data from GDC.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(tibble)
+library(DESeq2)
+library(biomaRt)
+library(tximport)
+library(tidyverse)
+library(vsn)
+library(hexbin)
+library(pheatmap)
+library(PCAtools)
+library(biomaRt)
+library(EnhancedVolcano)
+library(fgsea)
+library(RColorBrewer)
+```
+
+```{r}
+# Read in the clinical data for all 92 patients
+
+cdata <- read.delim("/home/evannaughton/project/transcriptomic_analysis_cna_quartiles/acc_tcga_clinical_data.tsv", header = T)
+head(cdata)
+```
+
+```{r}
+# Reading in the copy number data
+
+copy_number_data <- read.delim("/home/evannaughton/project/acc_tcga/data_cna.txt", header = T)
+head(copy_number_data)
+```
+
+```{r}
+# Calculating amplification score, deletion score and cna score for each patient
+
+# Remove the first two columns (Hugo_Symbol and Entrez_Gene_Id)
+copy_number_data <- copy_number_data[, -c(1, 2)]
+
+# Convert cna_data to a matrix for easier processing
+cna_matrix <- as.matrix(copy_number_data)
+
+# Calculate amplification score (number of genes with score 1 or 2)
+amplification_score <- colSums(cna_matrix == 1 | cna_matrix == 2)
+
+# Calculate deletion score (number of genes with score -1 or -2)
+deletion_score <- colSums(cna_matrix == -1 | cna_matrix == -2)
+
+# Combine scores into a single data frame
+scores <- data.frame(
+  Sample = colnames(cna_matrix),
+  Amplification_Score = amplification_score,
+  Deletion_Score = deletion_score
+)
+
+# Add the new column "cna_score"
+scores <- scores %>%
+  mutate(cna_score = Amplification_Score + Deletion_Score)
+
+# Removing rownames
+#rownames(scores) <- NULL
+
+# View the scores
+head(scores)
+```
+
+```{r}
+# Rename the Sample column to Sample.ID
+colnames(scores)[colnames(scores) == "Sample"] <- "Sample.ID"
+
+# Changing sample IDs to match the IDs in cdata
+
+scores$Sample.ID <- gsub("\\.", "-", scores$Sample.ID)
+head(scores)
+```
+
+```{r}
+# Merged dataframes based on Sample.ID
+
+cdata <- merge(cdata, scores, by = "Sample.ID", all = TRUE)
+```
+
+```{r}
+# quartiling the data based on cna score
+
+# Visualising using a density plot with quantiles
+
+dens <- density(cdata$cna_score)
+plot(dens, main = "Density Plot of CNA scores Across All 90 Samples", xlab = "CNA score", ylab = "Density")
+
+quantiles <- quantile(cdata$cna_score, probs = c(0.25, 0.5, 0.75))
+abline(v = quantiles, col = c("blue", "red", "green"))
+
+legend("topright", legend = c("1st Quartile", "Median", "3rd Quartile"), col = c("blue", "red", "green"), lty = 1)
+```
+
+```{r}
+# Count samples below 1st quartile
+samples_below_1st_quartile <- sum(cdata$cna_score < quantiles[1])
+
+# Count samples above 4th quartile
+samples_above_4th_quartile <- sum(cdata$cna_score > quantiles[3])
+
+cat("Number of samples below the 1st quartile:", samples_below_1st_quartile, "\n")
+cat("Number of samples above the 4th quartile:", samples_above_4th_quartile, "\n")
+```
+
+```{r}
+# Quintile plot
+
+dens2 <- density(cdata$cna_score)
+plot(dens2, main = "Density Plot of CNA score across 90 samples with quintiles", xlab = "CNA score", ylab = "Density")
+
+quantiles2 <- quantile(cdata$cna_score, probs = seq(0.2, 0.8, by = 0.2))
+abline(v = quantiles2, col = c("blue", "red", "green", "purple"), lty = 1)
+```
+
+```{r}
+# Count samples below 1st quintile
+samples_below_1st_quintile <- sum(cdata$cna_score < quantiles2[1])
+
+# Count samples above 4th quintile
+samples_above_4th_quintile <- sum(cdata$cna_score > quantiles2[4])
+
+cat("Number of samples below the 1st quintile:", samples_below_1st_quintile, "\n")
+cat("Number of samples above the 4th quintile:", samples_above_4th_quintile, "\n")
+```
+
+```{r}
+# Adding quintile and quartile columns to the data frame
+
+# Converting 'Expression_Value' column to numeric
+cdata$cna_score <- as.numeric(as.character(cdata$cna_score))
+
+# Calculate quartiles and quintiles
+quartiles <- quantile(cdata$cna_score, probs = c(0, 0.25, 0.5, 0.75, 1))
+quintiles <- quantile(cdata$cna_score, probs = seq(0, 1, by = 0.2))
+
+# Creating quartile column
+cdata$quartile <- cut(cdata$cna_score, breaks = quartiles, labels = FALSE)
+
+# Creating quintile column
+cdata$quintile <- cut(cdata$cna_score, breaks = quintiles, labels = FALSE)
+```
+
+```{r}
+# Recoding survival columns
+
+cdata$OS <- NA
+
+# Setting 'OS' values based on 'Overall.Survival.Status'
+cdata$OS[cdata$Overall.Survival.Status == "1:DECEASED"] <- 1
+cdata$OS[cdata$Overall.Survival.Status == "0:LIVING"] <- 0
+
+cdata$DFS <- NA
+
+# DFS values based on "Disease.Free.Status"
+cdata$DFS[cdata$Disease.Free.Status == "1:Recurred/Progressed"] <- 1
+cdata$DFS[cdata$Disease.Free.Status == "0:DiseaseFree"] <- 0
+```
+
+```{r}
+# Survival Analysis based on MKI67 expression quartiles
+
+surv_models <- survfit(Surv(Overall.Survival..Months., OS) ~ quartile, data = cdata)
+surv_models2 <- survfit(Surv(Disease.Free..Months., DFS) ~ quartile, data = cdata)
+
+# Plot survival curves for each quartile group with risk table
+ggsurvplot(surv_models, data = cdata, pval = TRUE,
+           legend.title = "Quartile",
+           title = "Survival Curves by Quartile of CNA Score",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.4, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+ggsurvplot(surv_models2, data = cdata, pval = TRUE,
+           legend.title = "Quartile",
+           title = "Disease Free Survival Curves by Quartile of CNA Score",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.4, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+# Perform log-rank test for quartile groups
+quartile_logrank_test <- survdiff(Surv(Overall.Survival..Months., OS) ~ quartile, data = cdata)
+quartile_logrank_test
+
+quartile_logrank_test2 <- survdiff(Surv(Disease.Free..Months., DFS) ~ quartile, data = cdata)
+quartile_logrank_test2
+```
+
+```{r}
+# Filtering the data for patients in quartiles 1 and 4
+quartile_data <- cdata %>% 
+  filter(quartile %in% c(1, 4))
+
+# Fit survival model for quartiles 1 and 4 combined
+surv_model2 <- survfit(Surv(Overall.Survival..Months., OS) ~ quartile, data = quartile_data)
+
+# Plot Kaplan-Meier curves for quartiles 1 and 4
+ggsurvplot(surv_model2, data = quartile_data, pval = TRUE, palette = c("turquoise", "red"),
+           legend.labs = c("Quartile 1", "Quartile 4"),
+           title = "Survival Curves for CNA Scores Quartiles 1 and 4",
+           xlab = "Time (months)", ylab = "Survival Probability", risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.3, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8) 
+
+# Log-Rank test
+quartile_1_4_logrank_test <- survdiff(Surv(Overall.Survival..Months., OS) ~ quartile, data = quartile_data)
+quartile_1_4_logrank_test
+```
+
+```{r}
+# Fitting Disease free survival for quartiles 1 and 4 combined
+surv_model3 <- survfit(Surv(Disease.Free..Months., DFS) ~ quartile, data = quartile_data)
+
+# Plot Kaplan-Meier curves for quartiles 1 and 4
+ggsurvplot(surv_model3, data = quartile_data, pval = TRUE, palette = c("turquoise", "red"),
+           legend.labs = c("Quartile 1", "Quartile 4"),
+           title = "Disease Free Survival Curves for CNA Scores Quartiles 1 and 4",
+           xlab = "Time (months)", ylab = "Survival Probability", risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.3, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8) 
+
+# Log-Rank test
+quartile_1_4_logrank_test2 <- survdiff(Surv(Disease.Free..Months., DFS) ~ quartile, data = quartile_data)
+quartile_1_4_logrank_test2
+```
+
+```{r}
+# Plotting the data using cutpoints
+cutpoint <- surv_cutpoint(
+  data = cdata,
+  time = "Overall.Survival..Months.",
+  event = "OS",
+  variables = "cna_score"
+)
+
+# Plot the cutpoint
+plot(cutpoint)
+
+# Extract the cutpoint value
+cutpoint_value <- cutpoint$cutpoint$cutpoint
+
+# Use the cutpoint to create a new column indicating the group
+cdata$group <- ifelse(cdata$cna_score > cutpoint_value, "high", "low")
+
+# Plot the survival curves based on the new group variable
+fit <- survfit(Surv(Overall.Survival..Months., OS) ~ group, data = cdata)
+
+ggsurvplot(fit, data = cdata, pval = TRUE, palette = c("red", "turquoise"),
+           legend.labs = c("High CNA Group", "Low CNA Group"),
+           title = "Cutpoint Survival - High & Low CNA Scores",
+           xlab = "Time (months)", ylab = "Survival Probability", risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.3, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8) 
+
+# Log-Rank test
+quartile_1_4_logrank_test2 <- survdiff(Surv(Overall.Survival..Months., OS) ~ group, data = cdata)
+quartile_1_4_logrank_test2
+
+```
+
+```{r}
+# Changing sample IDs to match the IDs in gdata
+
+quartile_data$Sample.ID <- gsub("-", "\\.", quartile_data$Sample.ID)
+head(quartile_data)
+```
+
+```{r}
+# Loading in genomic data (gdata)
+
+gdata <- read.delim("/home/evannaughton/project/acc_tcga/data_mrna_seq_v2_rsem.txt", header = T)
+head(gdata)
+```
+
+```{r}
+# Identifying Sample.IDs in the 1st quartile (low expression)
+quartile1_ids <- quartile_data$Sample.ID[quartile_data$quartile == 1]
+
+# Identifying Sample.IDs in the 4th quartile (high expression)
+quartile4_ids <- quartile_data$Sample.ID[quartile_data$quartile == 4]
+
+# Ensure quartile1_ids and quartile4_ids contain column names that exist in gdata
+# Convert them to character vectors
+quartile1_ids <- as.character(quartile1_ids)
+quartile4_ids <- as.character(quartile4_ids)
+```
+
+```{r}
+# Check if all quartile1_ids exist in gdata column names
+missing_quartile1_ids <- setdiff(quartile1_ids, colnames(gdata))
+print(missing_quartile1_ids)
+
+# Check if all quartile4_ids exist in gdata column names
+missing_quartile4_ids <- setdiff(quartile4_ids, colnames(gdata))
+print(missing_quartile4_ids)
+
+# These samples need to be removed from the analysis as they do not have rna-seq data available
+```
+
+```{r}
+# IDs to exclude
+ids_to_exclude <- c("TCGA.OR.A5JU.01", "TCGA.OR.A5KQ.01", "TCGA.OR.A5J4.01", "TCGA.OR.A5JH.01", "TCGA.OR.A5KB.01", "TCGA.OR.A5L2.01", "TCGA.OR.A5LI.01")
+
+# Remove missing IDs from quartile1_ids
+quartile1_ids <- setdiff(quartile1_ids, ids_to_exclude)
+
+# Remove missing IDs from quartile4_ids
+quartile4_ids <- setdiff(quartile4_ids, ids_to_exclude)
+
+# Print the updated IDs to verify
+print(quartile1_ids)
+print(quartile4_ids)
+```
+
+```{r}
+# Subset gdata for 1st quartile
+gdata_quartile1 <- gdata[, quartile1_ids, drop = FALSE]
+
+# Subset gdata for 4th quartile
+gdata_quartile4 <- gdata[, quartile4_ids, drop = FALSE]
+
+# Verify the resulting dataframes
+print(head(gdata_quartile1))
+print(head(gdata_quartile4))
+```
+
+```{r}
+# Need to add the gene identifiers 
+
+# Extract Hugo_Symbol and Entrez_Gene_Id columns from the original gdata dataframe
+gene_identifiers <- gdata[, c("Hugo_Symbol", "Entrez_Gene_Id")]
+
+# Combine expression data columns for low and high samples
+gdata_high_low <- cbind(gene_identifiers, gdata_quartile1, gdata_quartile4)
+```
+
+I NOW HAVE AN OBJECT CONTAINING GENE EXPRESSION DATA FOR HIGH AND LOW CNA SCORE SUBCOHORTS
+
+```{r}
+# Extracting "low" and "high" information from column names
+sample_groups <- gsub("\\d+", "", colnames(gdata_high_low))
+
+# Creating a factor variable indicating the sample groups
+group_variable <- factor(sample_groups, levels = c("low", "high"))
+
+# Checking levels of the grouping variable
+levels(group_variable)
+```
+
+```{r}
+# Creating a sample_metadata file
+quartile1_df <- data.frame(
+  Sample = quartile1_ids,
+  condition = "low",
+  replicate = seq_along(quartile1_ids)
+)
+
+quartile4_df <- data.frame(
+  Sample = quartile4_ids,
+  condition = "high",
+  replicate = seq_along(quartile4_ids)
+)
+
+# Combine the dataframes
+metaData <- rbind(quartile1_df, quartile4_df)
+
+metaData <- metaData %>% column_to_rownames(var = "Sample")
+
+print(metaData)
+```
+
+```{r}
+# Turning condition and replicate into factors 
+
+metaData$replicate <- factor(metaData$replicate)
+metaData$condition <- factor(metaData$condition)
+
+factor_cols <- sapply(metaData, is.factor)
+factor_cols
+```
+
+```{r}
+# Renaming gdata_high_low
+
+countData1 <- gdata_high_low
+
+# Making unique names due to duplicates
+
+rownames(countData1) = make.names(countData1$Hugo_Symbol, unique = TRUE)
+```
+
+```{r}
+# Removing unneccesarry columns
+
+countData1 <- subset(countData1, select = -Entrez_Gene_Id)
+countData1 <- subset(countData1, select = -Hugo_Symbol)
+```
+
+```{r}
+# rounding countdata
+
+countData1 = round(countData1)
+```
+
+```{r}
+# converting countdata1 and metaData to matrix
+
+countdata2 <- as.matrix(countData1)
+class(countdata2)
+
+metadata2 <- as.matrix(metaData)
+class(metadata2)
+
+ncol(countdata2) == nrow(metaData)
+```
+
+```{r}
+# creating DESeq object
+
+dds <- DESeqDataSetFromMatrix(countData = countdata2, colData=metadata2, design=~condition, tidy = FALSE)
+
+dds
+```
+
+```{r}
+# Running DESeq
+
+dds <- DESeq(dds)
+```
+
+```{r}
+# results table
+
+res <- results(dds)
+head(results(dds, tidy=TRUE))
+```
+
+```{r}
+# summary table
+
+summary(res)
+```
+
+```{r}
+# Sort summary list by p-value
+
+res <- res[order(res$padj),]
+head(res)
+```
+
+```{r}
+# plotCounts
+
+par(mfrow=c(2,3))
+
+plotCounts(dds, gene="PRSS8", intgroup="condition")
+plotCounts(dds, gene="MYLK3", intgroup="condition")
+plotCounts(dds, gene="CDH4", intgroup="condition")
+plotCounts(dds, gene="HIF3A", intgroup="condition")
+plotCounts(dds, gene="MAMDC2", intgroup="condition")
+plotCounts(dds, gene="KCNJ4", intgroup="condition")
+```
+
+These genes seem to be more highly expressed in the low CNA score group compared to the high CNA group. This could be due to the fact that the functionality of these genes are disturbed in the high CNA group due to the higher levels of genomic instability (amplifications/deletions) and so these genes are not being expressed due to this.
+
+```{r}
+
+# Quality control
+
+# We will use the gene-level counts to perform some quality control checks on the samples in the experiment. We will choose a suitable transformation for the gene counts to reduce impact of lowly-expressed genes on our analysis.
+
+# A useful initial step in an RNA-seq analysis is often to assess overall similarity between samples:
+
+#    Which samples are similar to each other, which are different?
+#    Does this fit to the expectation from the experiment’s design?
+#    What are the major sources of variation in the dataset?
+
+# Log2-transformed normalized counts are used to assess similarity between samples using Principal Component Analysis (PCA) and hierarchical clustering. Using log2 transformation, tools aim to moderate the variance across the mean, thereby improving the distances/clustering for these visualization methods.
+
+# Extract gene-level counts from the DDS object.
+
+counts <- counts(dds, normalized=TRUE)
+```
+
+```{r}
+# Transform Counts We’ll look at two transformations: log2(), and rlog().
+
+log2_counts <- assay(normTransform(dds))
+rld_counts <- assay(rlog(dds))
+
+# Log2 + PC Transformation
+
+log2_plt <- meanSdPlot(log2_counts, ranks=FALSE, plot=FALSE)
+log2_plt$gg + ggtitle("Log2 + PC Transformation") + xlim(0,20)
+```
+
+```{r}
+# Rlog Transformation
+
+rld_plt <- meanSdPlot(rld_counts, ranks=FALSE, plot=FALSE)
+rld_plt$gg + ggtitle("Rlog Transformation") + xlim(0,20)
+```
+
+```{r}
+# Sample Heatmap
+
+# Calculate distance between samples
+sampleDists <- dist(t(rld_counts))
+
+# Place distances in matrix
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(sampleDistMatrix)
+
+pheatmap(mat=sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         col=hcl.colors(100,"GnBu",rev=T),
+         width = 25,  
+         height = 45, 
+         fontsize_row = 7,  
+         fontsize_col = 7   
+)
+```
+
+```{r}
+# Creating a PCA bi-plot
+
+p <- pca(rld_counts, metadata = metadata2)
+
+biplot(p,
+       colby = 'condition',
+       colkey = c('high'='red', 'low'='turquoise'),
+       hline = 0,
+       vline = 0,
+       legendPosition = 'right',
+       legendLabSize = 12,
+       legendIconSize = 8.0,
+       title = 'PCA bi-plot',
+       subtitle = 'PC1 versus PC2')
+```
+
+```{r}
+# Extracting upregulated genes function
+
+get_upregulated <- function(df){
+    key <- intersect(rownames(df)[which(df$log2FoldChange>=1)], rownames(df)[which(df$pvalue<=0.05)])
+  results <- as.data.frame((df)[which(rownames(df) %in% key),])
+    return(results)
+}
+```
+
+```{r}
+# Extracting downregulated genes function
+
+get_downregulated <- function(df){
+    key <- intersect(rownames(df)[which(df$log2FoldChange<=-1)], rownames(df)[which(df$pvalue<=0.05)])
+    results <- as.data.frame((df)[which(rownames(df) %in% key),])
+    return(results)
+}
+```
+
+```{r}
+# Annotating DE genes function
+
+annotate_de_genes <- function(df){
+
+    df$hgnc_symbol <- rownames(df)
+    mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+    info <- getBM(attributes=c("hgnc_symbol",
+                               "ensembl_gene_id_version",
+                               "chromosome_name",
+                               "start_position",
+                               "end_position",
+                               "strand",
+                               "entrezgene_description"),
+                  filters = c("hgnc_symbol"),
+                  values = df$hgnc_symbol,
+                  mart = mart,
+                  useCache=FALSE)
+
+    tmp <- merge(df, info, by="hgnc_symbol")
+    tmp$strand <- gsub("-1", "-", tmp$strand)
+    tmp$strand <- gsub("1", "+", tmp$strand)
+    tmp$hgnc_symbol <- make.names(tmp$hgnc_symbol, unique = T)
+    tmp <- tmp[!grepl("CHR", tmp$chromosome_name),]
+
+    output_col <- c("Gene", "Ensembl ID", "Chromosome", "Start", "Stop", "Strand", "Description", "Log2FC", "P-value", "Adj P-value")
+    tmp <- subset(tmp, select=c(hgnc_symbol, ensembl_gene_id_version, chromosome_name, start_position, end_position, strand, entrezgene_description, log2FoldChange, pvalue, padj))
+    colnames(tmp) <- output_col
+
+    if(min(tmp$Log2FC) > 0){
+        tmp <- tmp[order(-tmp$Log2FC),]
+    }else{
+        tmp <- tmp[order(tmp$Log2FC),]
+    }
+
+    return(tmp)
+
+}
+```
+
+```{r}
+# Writing DE results
+
+de_up <- get_upregulated(as.data.frame(res))
+de_down <- get_downregulated(as.data.frame(res))
+upregulated_genes <- annotate_de_genes(de_up)
+downregulated_genes <- annotate_de_genes(de_down)
+```
+
+```{r}
+#confirm these worked
+head(upregulated_genes)
+head(downregulated_genes)
+```
+
+```{r}
+# Volcano plot
+
+## remove NA values from results
+res <- na.omit(res)
+
+## calculate min/max axis values for plot
+min_width <- min(res$log2FoldChange)
+max_width <- max(res$log2FoldChange)
+max_height <- -log10(min(res[res$pvalue>0, 5]))
+
+## Grab top 10 up-reg genes for plot
+up <- subset(res, res$log2FoldChange > 1 & res$pvalue <= 0.05)
+up <- up[order(-up$log2FoldChange),]
+up_list <- head(rownames(up), n=10L)
+
+## Grab top 10 down-reg genes for plot
+down <- subset(res, res$log2FoldChange < -1 & res$pvalue <= 0.05)
+down <- down[order(down$log2FoldChange),]
+down_list <- head(rownames(down), n=10L)
+
+# Appending the statistically significant genes to down_list
+#new_entries <- c("MKI67", "CENPF", "CENPA", "PLK1", "CDK1", "CDKN3")
+#down_list <- c(down_list, new_entries)
+
+## place top 20 DE genes in vector
+plot_top_20 <- c(up_list, down_list)
+
+EnhancedVolcano(res,
+                lab=rownames(res),
+                x="log2FoldChange",
+                y="pvalue",
+                selectLab=plot_top_20,
+                drawConnectors=TRUE,
+                legendPosition = "none",
+                FCcutoff=1.0,
+                pCutoff=0.05,
+                title="Volcano Plot",
+                subtitle="High CNA Score vs. Low CNA Score",
+                caption = paste0('Total Genes = ', nrow(res)),
+                xlim=c(min_width, max_width),
+                ylim=c(0, max_height),
+                max.overlaps = Inf)
+```
+
+The y-axis shows how statistically significant the gene expression differences are: more statistically significant genes will be towards the top (lower p-values)
+The x-axis shows how big the difference in gene expression is (fold change)
+Positive fold change means the gene is upregulated in the low CNA Score group compared to the high CNA group.
+Negative fold change means the gene is downregulated in the low CNA Score group compared to the high CNA group.
+Fold change of near 0 means there are no big differences in gene expression.
+
+```{r}
+# Heatmap of DE gene expression for each patient across high and low CNA Score subcohorts
+
+# selecting DE genes that passed the filtering our function produced
+up <- rownames(de_up)
+down <- rownames(de_down)
+
+# subset matrix to include only DE genes
+key <- c(up, down)
+subset <- rld_counts[which(rownames(rld_counts) %in% key),]
+
+# scale and center the values
+mat <- as.matrix(scale(t(subset), center = T))
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(mat)
+
+pheatmap(t(mat), 
+         show_rownames = FALSE,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         color = hcl.colors(100, "GnBu",rev=F))
+```
+
+PATHWAY ENRICHMENT ANALYSIS (GENE SET ENRICHMENT ANALYSIS) USING HALLMARK GENE SETS
+
+```{r}
+# converting results object to dataframe
+res1 <- as.data.frame(res) 
+res1$hgnc_symbol <- rownames(res1)
+```
+
+```{r}
+# computing summary stat
+fgsea_rank <- res1 %>%
+              dplyr::select(hgnc_symbol, log2FoldChange) %>%
+              na.omit() %>%
+              distinct() %>%
+              group_by(hgnc_symbol) %>%
+              summarize(stat=mean(log2FoldChange))
+
+head(fgsea_rank)
+```
+
+```{r}
+# creating a named list
+rank <- deframe(fgsea_rank)
+head(rank, 20)
+```
+
+```{r}
+# read in gmt file
+hallmark_pathway <- gmtPathways("/home/evannaughton/Downloads/h.all.v2023.2.Hs.symbols.gmt")
+head(hallmark_pathway, 1)
+```
+
+```{r}
+# run fgsea
+fgsea <- fgsea(pathways=hallmark_pathway, stats=rank, nperm=1000)
+
+fgseaResTidy <- fgsea %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+# Show in a nice table:
+fgseaResTidy %>%
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>%
+  arrange(padj) %>%
+  DT::datatable()
+```
+
+```{r}
+# Pathways enriched in the low CNA score samples
+
+filtered_pathway <- subset(fgsea, NES > 1.2)
+filtered_pathway
+```
+
+```{r}
+# Enrichment plots for pathways upregulated in low CNA score samples (downregulated in high CNA score samples)
+
+filt_up_low <- as.vector(filtered_pathway$pathway)
+
+for (i in filt_up_low){
+    plt <- plotEnrichment(pathway = hallmark_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Pathways enriched in the high CNA score samples
+
+filtered_pathway_high <- subset(fgsea, NES < -1.2)
+filtered_pathway_high
+```
+
+```{r}
+# Enrichment plots for pathways upregulated in high CNA score samples (downregulated in low CNA score samples)
+
+filt_up_high <- as.vector(filtered_pathway_high$pathway)
+
+for (i in filt_up_high){
+    plt <- plotEnrichment(pathway = hallmark_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Add a column to indicate the group
+filtered_pathway$group <- "Low"
+filtered_pathway_high$group <- "High"
+
+# Combine the data frames
+combined_pathways <- rbind(filtered_pathway, filtered_pathway_high)
+
+# Arrange data for plotting
+combined_pathways <- combined_pathways %>%
+  mutate(pathway = factor(pathway, levels = unique(pathway[order(NES)])))
+
+# Create the plot
+ggplot(combined_pathways, aes(x = pathway, y = NES, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Low" = "turquoise", "High" = "red")) +
+  labs(x = "Pathway", y = "NES", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.title.y = element_blank(),
+        legend.position = "top") +
+    ggtitle("Hallmark Enriched Pathways")
+```
+
+PATHWAY ENRICHMENT ANALYSIS (GENE SET ENRICHMENT ANALYSIS) USING GENE ONTOLOGY GENE SETS
+
+```{r}
+# read in gmt file
+GO_pathway <- gmtPathways("/home/evannaughton/Downloads/c5.go.v2023.2.Hs.symbols.gmt")
+head(GO_pathway, 1)
+```
+
+```{r}
+# run fgsea
+fgsea2 <- fgsea(pathways=GO_pathway, stats=rank, nperm=1000)
+
+fgseaResTidy2 <- fgsea2 %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+# Show in a nice table:
+fgseaResTidy2 %>%
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>%
+  arrange(padj) %>%
+  DT::datatable()
+```
+
+```{r}
+# Pathways enriched in the low CNA score samples
+
+filtered_pathway2 <- subset(fgsea2, NES > 1.91)
+filtered_pathway2
+```
+
+```{r}
+# Enrichment plots for pathways upregulated in low CNA score samples (downregulated in high CNA score samples)
+
+filt_up_low <- as.vector(filtered_pathway2$pathway)
+
+for (i in filt_up_low){
+    plt <- plotEnrichment(pathway = GO_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Pathways enriched in the high CNA score samples
+
+filtered_pathway_high2 <- subset(fgsea2, NES < -2.118)
+filtered_pathway_high2
+```
+
+```{r}
+# Enrichment plots
+
+filt_up_high2 <- as.vector(filtered_pathway_high2$pathway)
+
+for (i in filt_up_high2){
+    plt <- plotEnrichment(pathway = GO_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Add a column to indicate the group
+filtered_pathway2$group <- "Low"
+filtered_pathway_high2$group <- "High"
+
+# Combine the data frames
+combined_pathways2 <- rbind(filtered_pathway2, filtered_pathway_high2)
+
+# Arrange data for plotting
+combined_pathways2 <- combined_pathways2 %>%
+  mutate(pathway = factor(pathway, levels = unique(pathway[order(NES)])))
+
+# Create the plot
+ggplot(combined_pathways2, aes(x = pathway, y = NES, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Low" = "turquoise", "High" = "red")) +
+  labs(x = "Pathway", y = "NES", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.title.y = element_blank(),
+        legend.position = "top") +
+    ggtitle("GOBP Enriched Pathways")
+```
+
+DISCOVERED SECOND DATASET; "Adrenocortical Carcinoma (TCGA, PanCancer Atlas)" containing disease specific survival data. I was using data from the other dataset from cBioportal; "Adrenocortical Carcinoma (TCGA, Firehose Legacy)". I will also carry out a survival analysis / transcriptomics on the data within this other study and then compare to Eva's work.
+
+```{r}
+# Read in the clinical data for all 92 patients
+
+cdata2 <- read.delim("/home/evannaughton/project/transcriptomic_analysis_cna_quartiles/acc_tcga_pan_can_atlas_2018_clinical_data.tsv", header = T)
+head(cdata2)
+```
+
+```{r}
+# Reading in the copy number data
+
+copy_number_data2 <- read.delim("/home/evannaughton/project/transcriptomic_analysis_cna_quartiles/acc_tcga_pan_can_atlas_2018/data_cna.txt", header = T)
+head(copy_number_data2)
+```
+
+```{r}
+# Calculating amplification score, deletion score and cna score for each patient
+
+# Remove the first two columns (Hugo_Symbol and Entrez_Gene_Id)
+copy_number_data2 <- copy_number_data2[, -c(1, 2)]
+
+# Convert cna_data to a matrix for easier processing
+cna_matrix2 <- as.matrix(copy_number_data2)
+
+# Calculate amplification score (number of genes with score 1 or 2)
+amplification_score2 <- colSums(cna_matrix2 == 1 | cna_matrix2 == 2)
+
+# Calculate deletion score (number of genes with score -1 or -2)
+deletion_score2 <- colSums(cna_matrix2 == -1 | cna_matrix2 == -2)
+
+# Combine scores into a single data frame
+scores2 <- data.frame(
+  Sample = colnames(cna_matrix2),
+  Amplification_Score = amplification_score2,
+  Deletion_Score = deletion_score2
+)
+
+# Add the new column "cna_score"
+scores2 <- scores2 %>%
+  mutate(cna_score = Amplification_Score + Deletion_Score)
+
+# Removing rownames
+#rownames(scores) <- NULL
+
+# View the scores
+head(scores2)
+```
+
+```{r}
+# Rename the Sample column to Sample.ID
+colnames(scores2)[colnames(scores2) == "Sample"] <- "Sample.ID"
+
+# Changing sample IDs to match the IDs in cdata
+
+scores2$Sample.ID <- gsub("\\.", "-", scores2$Sample.ID)
+head(scores2)
+```
+
+```{r}
+# Merged dataframes based on Sample.ID
+cdata2 <- merge(cdata2, scores2, by = "Sample.ID", all = TRUE)
+```
+
+```{r}
+# Adding quintile and quartile columns to the data frame
+
+# Converting "cna_score" column to numeric
+cdata2$cna_score <- as.numeric(as.character(cdata2$cna_score))
+
+# Calculate quartiles and quintiles
+quartiles <- quantile(cdata2$cna_score, probs = c(0, 0.25, 0.5, 0.75, 1))
+quintiles <- quantile(cdata2$cna_score, probs = seq(0, 1, by = 0.2))
+
+# Creating quartile column
+cdata2$quartile <- cut(cdata2$cna_score, breaks = quartiles, labels = FALSE)
+
+# Creating quintile column
+cdata2$quintile <- cut(cdata2$cna_score, breaks = quintiles, labels = FALSE)
+```
+
+```{r}
+# Recoding survival columns
+
+cdata2$OS <- NA
+
+# Setting 'OS' values based on 'Overall.Survival.Status'
+cdata2$OS[cdata2$Overall.Survival.Status == "1:DECEASED"] <- 1
+cdata2$OS[cdata2$Overall.Survival.Status == "0:LIVING"] <- 0
+
+cdata$DFS <- NA
+
+# DFS values based on "Disease.Free.Status"
+cdata2$DFS[cdata2$Disease.Free.Status == "1:Recurred/Progressed"] <- 1
+cdata2$DFS[cdata2$Disease.Free.Status == "0:DiseaseFree"] <- 0
+
+cdata2$DSS <- NA
+
+# DSS values based on "Disease.specific.Survival.status"
+cdata2$DSS[cdata2$Disease.specific.Survival.status == "1:DEAD WITH TUMOR"] <- 1
+cdata2$DSS[cdata2$Disease.specific.Survival.status == "0:ALIVE OR DEAD TUMOR FREE"] <- 0
+```
+
+```{r}
+# Survival Analysis based on MKI67 expression quartiles
+
+surv_models <- survfit(Surv(Overall.Survival..Months., OS) ~ quartile, data = cdata2)
+surv_models2 <- survfit(Surv(Disease.Free..Months., DFS) ~ quartile, data = cdata2)
+surv_models3 <- survfit(Surv(Months.of.disease.specific.survival, DSS) ~ quartile, data = cdata2)
+
+# Plot survival curves for each quartile group with risk table
+ggsurvplot(surv_models, data = cdata2, pval = TRUE,
+           legend.title = "Quartile",
+           title = "Survival Curves by Quartile of CNA Score",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.4, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+ggsurvplot(surv_models2, data = cdata2, pval = TRUE,
+           legend.title = "Quartile",
+           title = "Disease Free Survival Curves by Quartile of CNA Score",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.4, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+ggsurvplot(surv_models3, data = cdata2, pval = TRUE,
+           legend.title = "Quartile",
+           title = "Disease Specific Survival Curves by Quartile of CNA Score",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.4, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+# Perform log-rank test for quartile groups
+quartile_logrank_test <- survdiff(Surv(Overall.Survival..Months., OS) ~ quartile, data = cdata2)
+quartile_logrank_test
+
+quartile_logrank_test2 <- survdiff(Surv(Disease.Free..Months., DFS) ~ quartile, data = cdata2)
+quartile_logrank_test2
+
+quartile_logrank_test3 <- survdiff(Surv(Months.of.disease.specific.survival, DSS) ~ quartile, data = cdata2)
+quartile_logrank_test3
+```
+
+Data now matches Eva's. There should also be 23 patients in quartile 1 but one was filtered out of the survival analysis because its disease specific survival time in months was "0.00000".
+
+```{r}
+# Filtering the data for patients in quartiles 1 and 4
+quartile_data2 <- cdata2 %>% 
+  filter(quartile %in% c(1, 4))
+
+# Fit survival model for quartiles 1 and 4 combined
+surv_model4 <- survfit(Surv(Months.of.disease.specific.survival, DSS) ~ quartile, data = quartile_data2)
+
+# Plot Kaplan-Meier curves for quartiles 1 and 4
+ggsurvplot(surv_model4, data = quartile_data2, pval = TRUE, palette = c("turquoise", "red"),
+           legend.labs = c("Quartile 1", "Quartile 4"),
+           title = "DSS Curves for CNA Scores Quartiles 1 & 4",
+           xlab = "Time (months)", ylab = "Survival Probability", risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.3, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8) 
+
+# Log-Rank test
+quartile_1_4_logrank_test3 <- survdiff(Surv(Months.of.disease.specific.survival, DSS) ~ quartile, data = quartile_data2)
+quartile_1_4_logrank_test3
+```
+
+```{r}
+# Fit survival model for quartiles 1 and 4 combined
+surv_model5 <- survfit(Surv(Overall.Survival..Months., OS) ~ quartile, data = quartile_data2)
+
+# Plot Kaplan-Meier curves for quartiles 1 and 4
+ggsurvplot(surv_model5, data = quartile_data2, pval = TRUE, palette = c("turquoise", "red"),
+           legend.labs = c("Quartile 1", "Quartile 4"),
+           title = "OS Curves for CNA Scores Quartiles 1 & 4",
+           xlab = "Time (months)", ylab = "Survival Probability", risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.3, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8) 
+
+# Log-Rank test
+quartile_1_4_logrank_test5 <- survdiff(Surv(Overall.Survival..Months., OS) ~ quartile, data = quartile_data2)
+quartile_1_4_logrank_test5
+```
+
+
+```{r}
+# Plotting the data using cutpoints
+cutpoint2 <- surv_cutpoint(
+  data = cdata2,
+  time = "Months.of.disease.specific.survival",
+  event = "DSS",
+  variables = "cna_score"
+)
+
+# Plot the cutpoint
+plot(cutpoint2)
+
+# Extract the cutpoint value
+cutpoint_value2 <- cutpoint2$cutpoint$cutpoint
+
+# Use the cutpoint to create a new column indicating the group
+cdata2$group <- ifelse(cdata2$cna_score > cutpoint_value2, "high", "low")
+
+# Plot the survival curves based on the new group variable
+fit2 <- survfit(Surv(Months.of.disease.specific.survival, DSS) ~ group, data = cdata2)
+
+ggsurvplot(fit2, data = cdata2, pval = TRUE, palette = c("red", "turquoise"),
+           legend.labs = c("High CNA Group", "Low CNA Group"),
+           title = "Cutpoint Survival - High & Low CNA Scores",
+           xlab = "Time (months)", ylab = "Survival Probability", risk.table = TRUE, 
+           risk.table.title = "Risk Table", 
+           risk.table.col = "strata", 
+           tables.height = 0.3, 
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8) 
+
+# Log-Rank test
+quartile_1_4_logrank_test4 <- survdiff(Surv(Months.of.disease.specific.survival, DSS) ~ group, data = cdata2)
+quartile_1_4_logrank_test4
+
+```
+
+Examining survival probabilities in both high and low CNA quartiles based on whether patients were treated with mitotane or not.
+
+```{r}
+# Select only the relevant columns from cdata
+cdata_relevant <- cdata %>% dplyr::select(Patient.ID, Mitotane.Therapy)
+
+# Merge cdata2 with cdata_relevant on Patient.ID
+cdata2_updated <- merge(cdata2, cdata_relevant, by = "Patient.ID", all.x = TRUE)
+
+# Filtering the data for patients in quartiles 1 and 4
+quartile_data2 <- cdata2_updated %>% 
+  filter(quartile %in% c(1, 4))
+
+# Convert Mitotane.Therapy to a factor
+quartile_data2$Mitotane.Therapy <- as.factor(quartile_data2$Mitotane.Therapy)
+
+# Separate data for quartile 1 and quartile 4
+quartile1_data <- quartile_data2 %>%
+  filter(quartile == 1)
+
+quartile4_data <- quartile_data2 %>%
+  filter(quartile == 4)
+
+# Overall Survival analysis for quartile 1 based on Mitotane therapy
+surv_model_q1 <- survfit(Surv(Overall.Survival..Months., OS) ~ Mitotane.Therapy, data = quartile1_data)
+
+# Kaplan-Meier curve 1 for quartile 1
+ggsurvplot(surv_model_q1, data = quartile1_data, pval = TRUE, palette = c("turquoise", "blue"),
+           legend.labs = c("No Mitotane Therapy", "Mitotane Therapy"),
+           title = "Overall Survival Curves for Quartile 1 based on Mitotane Therapy",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, risk.table.col = "strata", tables.height = 0.3,
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+# Log-Rank test 1 for quartile 1
+quartile1_logrank_test1 <- survdiff(Surv(Overall.Survival..Months., OS) ~ Mitotane.Therapy, data = quartile1_data)
+quartile1_logrank_test1
+
+# DSS analysis for quartile 1 based on Mitotane therapy
+surv_model2_q1 <- survfit(Surv(Months.of.disease.specific.survival, DSS) ~ Mitotane.Therapy, data = quartile1_data)
+
+# Kaplan-Meier curve 2 for quartile 1
+ggsurvplot(surv_model2_q1, data = quartile1_data, pval = TRUE, palette = c("turquoise", "blue"),
+           legend.labs = c("No Mitotane Therapy", "Mitotane Therapy"),
+           title = "Disease Specific Survival Curves for Quartile 1 based on Mitotane Therapy",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, risk.table.col = "strata", tables.height = 0.3,
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+# Log-Rank test 2 for quartile 1
+quartile1_logrank_test2 <- survdiff(Surv(Months.of.disease.specific.survival, DSS) ~ Mitotane.Therapy, data = quartile1_data)
+quartile1_logrank_test2
+```
+Non-significant for quartile 1
+
+```{r}
+# Overall Survival analysis for quartile 4 based on Mitotane therapy
+surv_model1_q4 <- survfit(Surv(Overall.Survival..Months., OS) ~ Mitotane.Therapy, data = quartile4_data)
+
+# Plot Kaplan-Meier curves for quartile 4
+ggsurvplot(surv_model1_q4, data = quartile4_data, pval = TRUE, palette = c("red", "orange"),
+           legend.labs = c("No Mitotane Therapy", "Mitotane Therapy"),
+           title = "Overall Survival Curves for Quartile 4 based on Mitotane Therapy",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, risk.table.col = "strata", tables.height = 0.3,
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+# Log-Rank test for quartile 4
+quartile4_logrank_test1 <- survdiff(Surv(Overall.Survival..Months., OS) ~ Mitotane.Therapy, data = quartile4_data)
+quartile4_logrank_test1
+
+# DSS analysis for quartile 4 based on Mitotane therapy
+surv_model2_q4 <- survfit(Surv(Months.of.disease.specific.survival, DSS) ~ Mitotane.Therapy, data = quartile4_data)
+
+# Kaplan-Meier curve 2 for quartile 4
+ggsurvplot(surv_model2_q4, data = quartile4_data, pval = TRUE, palette = c("red", "orange"),
+           legend.labs = c("No Mitotane Therapy", "Mitotane Therapy"),
+           title = "Disease Specific Survival Curves for Quartile 4 based on Mitotane Therapy",
+           xlab = "Time (months)", ylab = "Survival Probability",
+           risk.table = TRUE, risk.table.col = "strata", tables.height = 0.3,
+           theme = theme(plot.margin = margin(t = 2, r = 2, b = 2, l = 2, unit = "cm")),
+           size = 0.8)
+
+# Log-Rank test 2 for quartile 4
+quartile4_logrank_test2 <- survdiff(Surv(Months.of.disease.specific.survival, DSS) ~ Mitotane.Therapy, data = quartile4_data)
+quartile4_logrank_test2
+```
+Also non-significant for quartile 4.
+
+**Transcriptomics**
+
+```{r}
+# Changing sample IDs to match the IDs in gdata
+
+quartile_data2$Sample.ID <- gsub("-", "\\.", quartile_data2$Sample.ID)
+head(quartile_data2)
+```
+
+```{r}
+# Loading in genomic data (gdata)
+
+gdata2 <- read.delim("/home/evannaughton/project/transcriptomic_analysis_cna_quartiles/acc_tcga_pan_can_atlas_2018/data_mrna_seq_v2_rsem.txt", header = T)
+head(gdata2)
+```
+
+```{r}
+# Identifying Sample.IDs in the 1st quartile (low CNA score)
+quartile1_ids2 <- quartile_data2$Sample.ID[quartile_data2$quartile == 1]
+
+# Identifying Sample.IDs in the 4th quartile (high CNA score)
+quartile4_ids2 <- quartile_data2$Sample.ID[quartile_data2$quartile == 4]
+
+# Ensure quartile1_ids and quartile4_ids contain column names that exist in gdata
+# Convert them to character vectors
+quartile1_ids <- as.character(quartile1_ids)
+quartile4_ids <- as.character(quartile4_ids)
+```
+
+```{r}
+# Check if all quartile1_ids exist in gdata column names
+missing_quartile1_ids <- setdiff(quartile1_ids2, colnames(gdata2))
+print(missing_quartile1_ids)
+
+# Check if all quartile4_ids exist in gdata column names
+missing_quartile4_ids <- setdiff(quartile4_ids2, colnames(gdata2))
+print(missing_quartile4_ids)
+
+# These samples need to be removed from the analysis as they do not have rna-seq data available
+```
+
+```{r}
+# IDs to exclude
+ids_to_exclude <- c("TCGA.OR.A5JU.01", "TCGA.OR.A5KQ.01", "TCGA.OR.A5J4.01", "TCGA.OR.A5JH.01", "TCGA.OR.A5KB.01", "TCGA.OR.A5L2.01", "TCGA.OR.A5LI.01")
+
+# Remove missing IDs from quartile1_ids
+quartile1_ids2 <- setdiff(quartile1_ids2, ids_to_exclude)
+
+# Remove missing IDs from quartile4_ids
+quartile4_ids2 <- setdiff(quartile4_ids2, ids_to_exclude)
+
+# Print the updated IDs to verify
+print(quartile1_ids2)
+print(quartile4_ids2)
+```
+
+```{r}
+# Subset gdata for 1st quartile
+gdata_quartile1_2 <- gdata2[, quartile1_ids2, drop = FALSE]
+
+# Subset gdata for 4th quartile
+gdata_quartile4_2 <- gdata2[, quartile4_ids2, drop = FALSE]
+
+# Verify the resulting dataframes
+print(head(gdata_quartile1_2))
+print(head(gdata_quartile4_2))
+```
+
+```{r}
+# Need to add the gene identifiers 
+
+# Extract Hugo_Symbol and Entrez_Gene_Id columns from the original gdata dataframe
+gene_identifiers <- gdata2[, c("Hugo_Symbol", "Entrez_Gene_Id")]
+
+# Combine expression data columns for low and high samples
+gdata_high_low <- cbind(gene_identifiers, gdata_quartile1_2, gdata_quartile4_2)
+```
+
+I NOW HAVE AN OBJECT CONTAINING GENE EXPRESSION DATA FOR HIGH AND LOW CNA SCORE SUBCOHORTS
+
+```{r}
+# Extracting "low" and "high" information from column names
+sample_groups <- gsub("\\d+", "", colnames(gdata_high_low))
+
+# Creating a factor variable indicating the sample groups
+group_variable <- factor(sample_groups, levels = c("low", "high"))
+
+# Checking levels of the grouping variable
+levels(group_variable)
+```
+
+```{r}
+# Creating a sample_metadata file
+quartile1_df <- data.frame(
+  Sample = quartile1_ids2,
+  condition = "low",
+  replicate = seq_along(quartile1_ids2)
+)
+
+quartile4_df <- data.frame(
+  Sample = quartile4_ids2,
+  condition = "high",
+  replicate = seq_along(quartile4_ids2)
+)
+
+# Combine the dataframes
+metaData <- rbind(quartile1_df, quartile4_df)
+
+metaData <- metaData %>% column_to_rownames(var = "Sample")
+
+print(metaData)
+```
+
+```{r}
+# Turning condition and replicate into factors 
+
+metaData$replicate <- factor(metaData$replicate)
+metaData$condition <- factor(metaData$condition)
+
+factor_cols <- sapply(metaData, is.factor)
+factor_cols
+```
+
+```{r}
+# Renaming gdata_high_low
+
+countData1 <- gdata_high_low
+
+# Making unique names due to duplicates
+
+rownames(countData1) = make.names(countData1$Hugo_Symbol, unique = TRUE)
+```
+
+```{r}
+# Removing unneccesarry columns
+
+countData1 <- subset(countData1, select = -Entrez_Gene_Id)
+countData1 <- subset(countData1, select = -Hugo_Symbol)
+```
+
+```{r}
+# rounding countdata
+
+countData1 = round(countData1)
+```
+
+```{r}
+# converting countdata1 and metaData to matrix
+
+countdata2 <- as.matrix(countData1)
+class(countdata2)
+
+metadata2 <- as.matrix(metaData)
+class(metadata2)
+
+ncol(countdata2) == nrow(metaData)
+```
+
+```{r}
+# creating DESeq object
+
+dds <- DESeqDataSetFromMatrix(countData = countdata2, colData=metadata2, design=~condition, tidy = FALSE)
+
+dds
+```
+
+```{r}
+# Running DESeq
+
+dds <- DESeq(dds)
+```
+
+```{r}
+# results table
+
+res <- results(dds)
+head(results(dds, tidy=TRUE))
+```
+
+```{r}
+# summary table
+
+summary(res)
+```
+
+```{r}
+# Sort summary list by p-value
+
+res <- res[order(res$padj),]
+top50 <- head(res, 50)
+
+print(head(top50))
+```
+
+```{r}
+# Top 50 statistically significant miRNAs
+
+print(rownames(top50))
+```
+
+```{r}
+print(rownames(res)10)
+```
+
+```{r}
+# plotCounts
+
+par(mfrow=c(2,3))
+
+plotCounts(dds, gene="PRSS8", intgroup="condition")
+plotCounts(dds, gene="EPS8L2", intgroup="condition")
+plotCounts(dds, gene="CDH4", intgroup="condition")
+plotCounts(dds, gene="B4GALNT1", intgroup="condition")
+plotCounts(dds, gene="HIF3A", intgroup="condition")
+plotCounts(dds, gene="MAMDC2", intgroup="condition")
+```
+
+```{r}
+
+# Quality control
+
+# We will use the gene-level counts to perform some quality control checks on the samples in the experiment. We will choose a suitable transformation for the gene counts to reduce impact of lowly-expressed genes on our analysis.
+
+# A useful initial step in an RNA-seq analysis is often to assess overall similarity between samples:
+
+#    Which samples are similar to each other, which are different?
+#    Does this fit to the expectation from the experiment’s design?
+#    What are the major sources of variation in the dataset?
+
+# Log2-transformed normalized counts are used to assess similarity between samples using Principal Component Analysis (PCA) and hierarchical clustering. Using log2 transformation, tools aim to moderate the variance across the mean, thereby improving the distances/clustering for these visualization methods.
+
+# Extract gene-level counts from the DDS object.
+
+counts <- counts(dds, normalized=TRUE)
+```
+
+```{r}
+# Transform Counts We’ll look at two transformations: log2(), and rlog().
+
+log2_counts <- assay(normTransform(dds))
+rld_counts <- assay(rlog(dds))
+
+# Log2 + PC Transformation
+
+log2_plt <- meanSdPlot(log2_counts, ranks=FALSE, plot=FALSE)
+log2_plt$gg + ggtitle("Log2 + PC Transformation") + xlim(0,20)
+```
+
+```{r}
+# Rlog Transformation
+
+rld_plt <- meanSdPlot(rld_counts, ranks=FALSE, plot=FALSE)
+rld_plt$gg + ggtitle("Rlog Transformation") + xlim(0,20)
+```
+
+```{r}
+# Sample Heatmap
+
+# Calculate distance between samples
+sampleDists <- dist(t(rld_counts))
+
+# Place distances in matrix
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(sampleDistMatrix)
+
+pheatmap(mat=sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         col=hcl.colors(100,"GnBu",rev=T),
+         width = 25,  
+         height = 45, 
+         fontsize_row = 7,  
+         fontsize_col = 7   
+)
+```
+
+```{r}
+# Creating a PCA bi-plot
+
+p <- pca(rld_counts, metadata = metadata2)
+
+biplot(p,
+       colby = 'condition',
+       colkey = c('high'='red', 'low'='turquoise'),
+       hline = 0,
+       vline = 0,
+       legendPosition = 'right',
+       legendLabSize = 12,
+       legendIconSize = 8.0,
+       title = 'PCA bi-plot',
+       subtitle = 'PC1 versus PC2')
+```
+
+```{r}
+# Writing DE results
+
+de_up <- get_upregulated(as.data.frame(res))
+de_down <- get_downregulated(as.data.frame(res))
+upregulated_genes <- annotate_de_genes(de_up)
+downregulated_genes <- annotate_de_genes(de_down)
+```
+
+```{r}
+#confirm these worked
+head(upregulated_genes)
+head(downregulated_genes)
+```
+
+```{r}
+# Volcano plot
+
+## remove NA values from results
+res <- na.omit(res)
+
+## calculate min/max axis values for plot
+min_width <- min(res$log2FoldChange)
+max_width <- max(res$log2FoldChange)
+max_height <- -log10(min(res[res$pvalue>0, 5]))
+
+## Grab top 10 up-reg genes for plot
+up <- subset(res, res$log2FoldChange > 1 & res$pvalue <= 0.05)
+up <- up[order(-up$log2FoldChange),]
+up_list <- head(rownames(up), n=10L)
+
+## Grab top 10 down-reg genes for plot
+down <- subset(res, res$log2FoldChange < -1 & res$pvalue <= 0.05)
+down <- down[order(down$log2FoldChange),]
+down_list <- head(rownames(down), n=10L)
+
+# Appending the statistically significant genes to down_list
+new_entries <- c("PRSS8", "EPS8L2", "CDH4", "B4GALNT1", "HIF3A", "MAMDC2", "EFCAB4A", "SDK1", "C9orf40", "ACE2")
+up_list <- c(up_list, new_entries)
+
+## place top 20 DE genes in vector
+plot_top_20 <- c(up_list, down_list)
+
+EnhancedVolcano(res,
+                lab=rownames(res),
+                x="log2FoldChange",
+                y="pvalue",
+                selectLab=plot_top_20,
+                drawConnectors=TRUE,
+                legendPosition = "none",
+                FCcutoff=1.0,
+                pCutoff=0.05,
+                title="Volcano Plot",
+                subtitle="High CNA Score vs. Low CNA Score",
+                caption = paste0('Total Genes = ', nrow(res)),
+                xlim=c(min_width, max_width),
+                ylim=c(0, max_height),
+                max.overlaps = Inf)
+```
+
+```{r}
+# Heatmap of DE gene expression for each patient across high and low CNA Score subcohorts
+
+# selecting DE genes that passed the filtering our function produced
+up <- rownames(de_up)
+down <- rownames(de_down)
+
+# subset matrix to include only DE genes
+key <- c(up, down)
+subset <- rld_counts[which(rownames(rld_counts) %in% key),]
+
+# scale and center the values
+mat <- as.matrix(scale(t(subset), center = T))
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(mat)
+
+pheatmap(t(mat), 
+         show_rownames = FALSE,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         color = hcl.colors(100, "GnBu",rev=F))
+```
+
+PATHWAY ENRICHMENT ANALYSIS (GENE SET ENRICHMENT ANALYSIS) USING HALLMARK GENE SETS
+
+```{r}
+# converting results object to dataframe
+res1 <- as.data.frame(res) 
+res1$hgnc_symbol <- rownames(res1)
+```
+
+```{r}
+# computing summary stat
+fgsea_rank <- res1 %>%
+              dplyr::select(hgnc_symbol, log2FoldChange) %>%
+              na.omit() %>%
+              distinct() %>%
+              group_by(hgnc_symbol) %>%
+              summarize(stat=mean(log2FoldChange))
+
+head(fgsea_rank)
+```
+
+```{r}
+# creating a named list
+rank <- deframe(fgsea_rank)
+head(rank, 20)
+```
+
+```{r}
+# run fgsea
+fgsea <- fgsea(pathways=hallmark_pathway, stats=rank, nperm=1000)
+
+fgseaResTidy <- fgsea %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+# Show in a nice table:
+fgseaResTidy %>%
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>%
+  arrange(padj) %>%
+  DT::datatable()
+```
+
+```{r}
+# Pathways enriched in the low CNA score samples
+
+filtered_pathway <- subset(fgsea, NES > 1.2)
+filtered_pathway
+```
+
+```{r}
+# Pathways enriched in the high CNA score samples
+
+filtered_pathway_high <- subset(fgsea, NES < -1.085)
+filtered_pathway_high
+```
+
+```{r}
+# Add a column to indicate the group
+filtered_pathway$group <- "Low"
+filtered_pathway_high$group <- "High"
+
+# Combine the data frames
+combined_pathways <- rbind(filtered_pathway, filtered_pathway_high)
+
+# Arrange data for plotting
+combined_pathways <- combined_pathways %>%
+  mutate(pathway = factor(pathway, levels = unique(pathway[order(NES)])))
+
+# Create the plot
+ggplot(combined_pathways, aes(x = pathway, y = NES, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Low" = "turquoise", "High" = "red")) +
+  labs(x = "Pathway", y = "NES", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.title.y = element_blank(),
+        legend.position = "top") +
+    ggtitle("Hallmark Enriched Pathways")
+```
+
+PATHWAY ENRICHMENT ANALYSIS (GENE SET ENRICHMENT ANALYSIS) USING GENE ONTOLOGY GENE SETS
+
+```{r}
+# run fgsea
+fgsea2 <- fgsea(pathways=GO_pathway, stats=rank, nperm=1000)
+
+fgseaResTidy2 <- fgsea2 %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+# Show in a nice table:
+fgseaResTidy2 %>%
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>%
+  arrange(padj) %>%
+  DT::datatable()
+```
+
+```{r}
+# Pathways enriched in the low CNA score samples
+
+filtered_pathway2 <- subset(fgsea2, NES > 1.94)
+filtered_pathway2
+```
+
+```{r}
+# Pathways enriched in the high CNA score samples
+
+filtered_pathway_high2 <- subset(fgsea2, NES < -2.14)
+filtered_pathway_high2
+```
+
+```{r}
+# Add a column to indicate the group
+filtered_pathway2$group <- "Low"
+filtered_pathway_high2$group <- "High"
+
+# Combine the data frames
+combined_pathways2 <- rbind(filtered_pathway2, filtered_pathway_high2)
+
+# Arrange data for plotting
+combined_pathways2 <- combined_pathways2 %>%
+  mutate(pathway = factor(pathway, levels = unique(pathway[order(NES)])))
+
+# Create the plot
+ggplot(combined_pathways2, aes(x = pathway, y = NES, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Low" = "turquoise", "High" = "red")) +
+  labs(x = "Pathway", y = "NES", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.title.y = element_blank(),
+        legend.position = "top") +
+    ggtitle("GOBP E Pathways")
+```
+
+**MicroRNA analysis using GDC data from the same patients**
+
+```{r}
+# Creating a dataframe out of the miRNA sample folders
+
+data_dir <- "/home/evannaughton/project/miRNA_data/"
+
+folders <- list.dirs(data_dir, recursive = FALSE)
+
+# Function to read miRNA data
+read_miRNA_data <- function(folder_path) {
+  files <- list.files(folder_path, full.names = TRUE)
+  sample_id <- basename(folder_path)
+  data <- read.table(files[1], header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  
+  # Select miRNA_ID and read_count columns 
+  data <- data[, c("miRNA_ID", "read_count")]
+  colnames(data)[2] <- sample_id
+  return(data)
+}
+
+# Apply function to all folders and combine data
+all_data <- lapply(folders, read_miRNA_data)
+combined_data <- Reduce(function(x, y) merge(x, y, by = "miRNA_ID", all = TRUE), all_data)
+```
+
+```{r}
+# Subsetting data so I just have samples belonging to quartile 1 & quartile 4
+
+# Subset combined_data for 1st quartile
+combined_data_quartile1 <- combined_data[, quartile1_ids2]
+
+# Subset gdata for 4th quartile
+combined_data_quartile4 <- combined_data[, quartile4_ids2]
+```
+
+```{r}
+# Extract miRNA_ID column from the original combined_data dataframe
+miRNA_identifier <- combined_data[, c("miRNA_ID")]
+
+# Combine expression data columns for low and high samples
+countData <- cbind(miRNA_identifier, combined_data_quartile1, combined_data_quartile4)
+```
+
+Using this dataframe along with the previous sample_metadata file, it is possible to use DESeq to carry out differential miRNA expression analysis between the high and low MKI67 expression subcohorts.
+
+```{r}
+# Setting miRNA IDs as rownames
+
+rownames(countData) = make.names(countData$miRNA_identifier)
+
+# The warning message is just indicating that upon creating rownames, it has converted the "-" in each miRNA Identifier to ".". 
+```
+
+```{r}
+# Removing unneccesarry columns
+
+countData <- subset(countData, select = -miRNA_identifier)
+```
+
+```{r}
+# converting countdata and metaData to matrix
+
+countdata <- as.matrix(countData)
+class(countdata)
+
+metadata2 <- as.matrix(metaData)
+class(metadata2)
+
+ncol(countdata) == nrow(metaData)
+```
+
+```{r}
+# creating DESeq object
+
+dds <- DESeqDataSetFromMatrix(countData = countdata, colData=metadata2, design=~condition, tidy = FALSE)
+
+dds
+```
+
+```{r}
+# Running DESeq
+
+dds <- DESeq(dds)
+```
+
+```{r}
+# results table
+
+res <- results(dds)
+head(results(dds, tidy=TRUE))
+```
+
+```{r}
+# summary table
+
+summary(res)
+```
+
+```{r}
+# Sort summary list by p-value
+
+res <- res[order(res$padj),]
+top50 <- head(res, 50)
+
+print(head(top50))
+```
+
+```{r}
+# Searching for some known miRNAs in aggressive ACC
+
+# List of miRNAs to search for
+search_miRNAs <- c("hsa.mir.483.5p", "hsa.mir.503", "hsa.mir.210", "hsa.mir.139.5p", "hsa.mir.195")
+
+# Convert DESeqResults object to dataframe
+res_df <- as.data.frame(res)
+
+# Filter the dataframe using rownames
+filtered_res <- res_df[rownames(res_df) %in% search_miRNAs, ]
+
+# View the filtered results
+print(filtered_res)
+```
+
+There are no statistically significant differences in miRNA expression between high and low CNA quartiles.

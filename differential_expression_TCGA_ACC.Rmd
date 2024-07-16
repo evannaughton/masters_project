@@ -1,0 +1,1535 @@
+---
+title: "differential_expression_TCGA_ACC"
+author: "Evan_Naughton"
+date: "2024-05-09"
+output: html_document
+---
+
+**Carrying out differential gene expression analyses, Gene set enrichment analyses, and others between the high and low MKI67 expression cohorts**
+
+```{r}
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+#
+#BiocManager::install("fgsea")
+
+#install.packages("formattable")
+```
+
+```{r}
+library(DESeq2)
+library(biomaRt)
+library(tximport)
+library(tidyverse)
+library(vsn)
+library(hexbin)
+library(pheatmap)
+library(PCAtools)
+library(biomaRt)
+library(EnhancedVolcano)
+library(fgsea)
+library(RColorBrewer)
+library(factoextra)
+library(plotly)
+library(limma)
+library(formattable)
+library(edgeR)
+```
+
+```{r}
+# Reading in the data
+
+finaldf <- read.table("/home/evannaughton/project/r_code/finaldf.txt", header = T) 
+```
+
+```{r}
+# Separating the data based on quartiles
+
+quartile_data <- finaldf %>% 
+  filter(quartile %in% c(1, 4))
+
+# Changing sample IDs to match the IDs in gdata
+
+quartile_data$Sample.ID <- gsub("-", "\\.", quartile_data$Sample.ID)
+head(quartile_data)
+```
+
+```{r}
+# Loading in genomic data (gdata)
+
+# Reading in the genomic data
+
+gdata <- read.delim("/home/evannaughton/project/acc_tcga/data_mrna_seq_v2_rsem.txt", header = T)
+head(gdata)
+```
+
+```{r}
+# Subsetting the genomic data for each quartile
+
+# Identifying Sample.IDs in the 1st quartile (low expression)
+quartile1_ids <- quartile_data$Sample.ID[quartile_data$quartile == 1]
+
+# Identifying Sample.IDs in the 4th quartile (high expression)
+quartile4_ids <- quartile_data$Sample.ID[quartile_data$quartile == 4]
+
+# Subset gdata for 1st quartile
+gdata_quartile1 <- gdata[, quartile1_ids]
+
+# Subset gdata for 4th quartile
+gdata_quartile4 <- gdata[, quartile4_ids]
+```
+
+```{r}
+#write.table(gdata_quartile1, file = "/home/evannaughton/project/r_code/gdata_quartile1", sep="\t", quote = F)
+#write.table(gdata_quartile4, file = "/home/evannaughton/project/r_code/gdata_quartile4", sep="\t", quote = F)
+```
+
+```{r}
+sample_metadata <- read.csv("/home/evannaughton/project/sample_metadata.csv", header = T)
+head(sample_metadata)
+```
+
+```{r}
+# OPTIONAL
+
+# Rename columns for gdata_quartile1 (low expression)
+#colnames(gdata_quartile1) <- paste0("low", 1:ncol(gdata_quartile1))
+
+# Rename columns for gdata_quartile4 (high expression)
+#colnames(gdata_quartile4) <- paste0("high", 1:ncol(gdata_quartile4))
+```
+
+```{r}
+# Need to add the gene identifiers 
+
+# Extract Hugo_Symbol and Entrez_Gene_Id columns from the original gdata dataframe
+gene_identifiers <- gdata[, c("Hugo_Symbol", "Entrez_Gene_Id")]
+
+# Combine expression data columns for low and high samples
+gdata_high_low <- cbind(gene_identifiers, gdata_quartile1, gdata_quartile4)
+```
+
+```{r}
+# Object with IDs
+
+gdata_high_low_withID <- cbind(gene_identifiers, gdata_quartile1, gdata_quartile4)
+
+# Saving this table
+#write.table(gdata_high_low_withID, file = "gdata_high_low_withID.txt", sep = "\t")
+```
+
+I NOW HAVE AN OBJECT CONTAINING GENE EXPRESSION DATA FOR HIGH AND LOW MKI67 SUBCOHORTS
+
+```{r}
+# Extracting "low" and "high" information from column names
+sample_groups <- gsub("\\d+", "", colnames(gdata_high_low))
+
+# Creating a factor variable indicating the sample groups
+group_variable <- factor(sample_groups, levels = c("low", "high"))
+
+# Checking levels of the grouping variable
+levels(group_variable)
+```
+
+```{r}
+# Read count data and metadata
+
+countData1 <- read.table("/home/evannaughton/project/r_code/gdata_high_low_withID.txt", header = TRUE, row.names = NULL)
+metaData <- read.csv("/home/evannaughton/project/sample_metadata.csv", header = TRUE, row.names = 1)
+
+#write.table(countData1, file = "/home/evannaughton/project/countdata_highlow.txt", sep = "\t")
+```
+
+```{r}
+# Turning condition and replicate into factors 
+
+metaData$replicate <- factor(metaData$replicate)
+metaData$condition <- factor(metaData$condition)
+# check its ok:
+factor_cols <- sapply(metaData, is.factor)
+factor_cols
+```
+
+```{r}
+# Making unique names due to duplicates
+
+rownames(countData1) = make.names(countData1$Hugo_Symbol, unique = TRUE)
+```
+
+```{r}
+# Removing unneccesarry columns
+
+countData1 <- subset(countData1, select = -Entrez_Gene_Id)
+countData1 <- subset(countData1, select = -row.names)
+countData1 <- subset(countData1, select = -Hugo_Symbol)
+```
+
+```{r}
+# rounding countdata
+
+countData1 = round(countData1)
+```
+
+```{r}
+# converting countdata1 and metaData to matrix
+
+countdata2 <- as.matrix(countData1)
+class(countdata2)
+
+metadata2 <- as.matrix(metaData)
+class(metadata2)
+
+ncol(countdata2) == nrow(metaData)
+
+# rounding countdata2
+
+countdata2 = round(countdata2)
+```
+
+```{r}
+# creating DESeq object
+
+dds <- DESeqDataSetFromMatrix(countData = countdata2, colData=metadata2, design=~condition, tidy = FALSE)
+
+dds
+```
+
+```{r}
+# Running DESeq
+
+dds <- DESeq(dds)
+```
+
+```{r}
+# results table
+
+res <- results(dds)
+head(results(dds, tidy=TRUE))
+```
+
+```{r}
+# summary table
+
+summary(res)
+```
+
+```{r}
+# Sort summary list by p-value
+
+res <- res[order(res$padj),]
+top50 <- head(res, 100)
+
+print(head(top50))
+```
+
+```{r}
+# Top 50 statistically significant genes
+
+print(rownames(top50))
+```
+
+```{r}
+# plotCounts
+
+par(mfrow=c(2,3))
+
+plotCounts(dds, gene="MKI67", intgroup="condition")
+plotCounts(dds, gene="CENPF", intgroup="condition")
+plotCounts(dds, gene="CENPA", intgroup="condition")
+plotCounts(dds, gene="PLK1", intgroup="condition")
+plotCounts(dds, gene="CDK1", intgroup="condition")
+plotCounts(dds, gene="CDKN3", intgroup="condition")
+```
+
+```{r}
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-3,3)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+```
+
+```{r}
+#First we need to transform the raw count data
+#vst function will perform variance stabilizing transformation
+
+vsdata <- vst(dds, blind=FALSE)
+
+plotPCA(vsdata, intgroup="condition") #using the DESEQ2 plotPCA fxn we can
+```
+
+```{r}
+# Quality control
+
+# We will use the gene-level counts to perform some quality control checks on the samples in the experiment. We will choose a suitable transformation for the gene counts to reduce impact of lowly-expressed genes on our analysis.
+
+# A useful initial step in an RNA-seq analysis is often to assess overall similarity between samples:
+
+#    Which samples are similar to each other, which are different?
+#    Does this fit to the expectation from the experiment’s design?
+#    What are the major sources of variation in the dataset?
+
+# Log2-transformed normalized counts are used to assess similarity between samples using Principal Component Analysis (PCA) and hierarchical clustering. Using log2 transformation, tools aim to moderate the variance across the mean, thereby improving the distances/clustering for these visualization methods.
+
+# Extract gene-level counts from the DDS object.
+
+counts <- counts(dds, normalized=TRUE)
+
+```
+
+```{r}
+# Transform Counts We’ll look at two transformations: log2(), and rlog().
+
+log2_counts <- assay(normTransform(dds))
+rld_counts <- assay(rlog(dds))
+
+# Log2 + PC Transformation
+
+log2_plt <- meanSdPlot(log2_counts, ranks=FALSE, plot=FALSE)
+log2_plt$gg + ggtitle("Log2 + PC Transformation") + xlim(0,20)
+```
+```{r}
+# Rlog Transformation
+
+rld_plt <- meanSdPlot(rld_counts, ranks=FALSE, plot=FALSE)
+rld_plt$gg + ggtitle("Rlog Transformation") + xlim(0,20)
+```
+
+```{r}
+# Saving counts
+
+#dir.create("/home/evannaughton/project/counts")
+#write.table(counts, "/home/evannaughton/project/normalised_counts.txt", sep="\t", quote = F)
+#write.table(log2_counts, "/home/evannaughton/project/log2_counts.txt", sep="\t", quote = F)
+```
+
+```{r}
+condition_column <- metadata2[, "condition"]
+```
+
+```{r}
+# Sample Heatmap
+
+# Calculate distance between samples
+sampleDists <- dist(t(rld_counts))
+
+# Place distances in matrix
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(sampleDistMatrix)
+
+pheatmap(mat=sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         col=hcl.colors(100,"GnBu",rev=T),
+         width = 25,  
+         height = 45, 
+         fontsize_row = 7,  
+         fontsize_col = 7   
+)
+```
+
+```{r}
+# Creating a PCA bi-plot
+
+p <- pca(rld_counts, metadata = metadata2)
+biplot(p,
+       colby = 'condition',
+       colkey = c('high'='red', 'low'='turquoise'),
+       hline = 0,
+       vline = 0,
+       legendPosition = 'right',
+       legendLabSize = 12,
+       legendIconSize = 8.0,
+       title = 'PCA bi-plot',
+       subtitle = 'PC1 versus PC2')
+```
+
+```{r}
+# Creating a scree plot
+
+# Identify columns with zero variance
+zero_variance_columns <- apply(rld_counts, 2, var) == 0
+print(paste("Zero-variance columns:", sum(zero_variance_columns)))
+
+# Remove zero-variance columns
+rld_counts_filtered <- rld_counts[, !zero_variance_columns]
+
+# Identify rows with zero variance
+zero_variance_rows <- apply(rld_counts_filtered, 1, var) == 0
+print(paste("Zero-variance rows:", sum(zero_variance_rows)))
+
+# Remove zero-variance rows
+rld_counts_filtered <- rld_counts_filtered[!zero_variance_rows, ]
+
+# Verify dimensions of the filtered data
+print(dim(rld_counts_filtered))
+
+# Calculate PCA on the filtered data
+pca_result <- prcomp(t(rld_counts_filtered), scale = TRUE)
+
+# Extract proportion of variance explained by each PC
+explained_var <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+# Create a scree plot
+scree_plot <- qplot(y = explained_var, x = 1:length(explained_var)) +
+  geom_line() +
+  xlab("Principal Component") +
+  ylab("Proportion of Variance Explained") +
+  ggtitle("Scree Plot")
+
+print(scree_plot)
+
+
+```
+
+Removed ZERO variance rows and columns before creating scree plot.
+The x-axis represents the principal components ordered from PC1 to PC40.
+The y-axis shows the proportion of total variance explained by each principal component.
+The "elbow point" in a scree plot is where the explained variance starts to level off. Before this point, each additional PC explains a substantial amount of variance. After this point, each additional PC explains progressively less variance.
+In the plot, the elbow appears around PC4 or PC5. This suggests that the first few principal components capture most of the variance in the data.
+
+PC1 explains the largest amount of variance, approximately 10%.
+PC2 explains around 7-8% of the variance.
+Subsequent PCs explain progressively less variance, with the contribution becoming small after PC10.
+I can now plot a 3D PCA to explain the variance found in PC1, PC2, and PC3.
+
+```{r}
+#Creating a 3D PCA plot
+metadata2 <- as.data.frame(metadata2)
+
+# Extract the first three PCs
+pca_data <- data.frame(pca_result$x[, 1:3])
+pca_data$condition <- metadata2$condition  
+
+# Create a 3D scatter plot
+fig <- plot_ly(pca_data, x = ~PC1, y = ~PC2, z = ~PC3, color = ~condition, colors = c('red', 'turquoise')) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'PC1'),
+                      yaxis = list(title = 'PC2'),
+                      zaxis = list(title = 'PC3')),
+         title = "3D PCA Plot")
+
+fig
+```
+
+
+The 3D PCA plot shows how distantly clustered the 3 outlier samples are from the body of the other samples. I will perform further analysis to identify why these samples are distinct from the others. For example, I can compare the gene expression profiles of the outliers with the rest of the samples to identify differentially expressed genes.
+
+```{r}
+# Making object
+rownames(gdata_high_low) = make.names(gdata_high_low$Hugo_Symbol, unique = TRUE)
+expression_data <- gdata_high_low[, !(colnames(gdata_high_low) %in% c("Hugo_Symbol", "Entrez_Gene_Id"))]
+
+# separating them
+outliers <- c("TCGA.OR.A5J8.01", "TCGA.OR.A5JB.01", "TCGA.P6.A5OG.01")
+expression_outliers <- expression_data[, colnames(expression_data) %in% outliers]
+expression_others <- expression_data[, !colnames(expression_data) %in% outliers]
+```
+
+```{r}
+# Differential expression analysis using limma
+combined_expression <- expression_data[, c(outliers, colnames(expression_others))]
+group <- factor(ifelse(colnames(combined_expression) %in% outliers, "Outliers", "Others"))
+
+design <- model.matrix(~ group)
+
+# Fit the linear model
+fit <- lmFit(combined_expression, design)
+
+# Apply empirical Bayes smoothing
+fit <- eBayes(fit)
+
+# Get the top differentially expressed genes
+top_table <- topTable(fit, coef="groupOutliers", number=Inf)
+
+# View the top results
+head(top_table)
+```
+
+Upregulated: If logFC > 0, the gene is upregulated in outliers.
+Downregulated: If logFC < 0, the gene is downregulated in outliers.
+
+```{r}
+# Upregulated genes
+upregulated_genes <- top_table[top_table$logFC > 0 & top_table$adj.P.Val < 0.05, ]
+
+# Downregulated genes
+downregulated_genes <- top_table[top_table$logFC < 0 & top_table$adj.P.Val < 0.05, ]
+
+head(upregulated_genes)
+head(downregulated_genes)
+```
+
+```{r}
+# Volcano plot
+
+# Create a data frame for plotting
+volcano_data <- top_table
+volcano_data$Gene <- rownames(volcano_data)
+
+# Define thresholds for logFC and adjusted p-value
+logFC_threshold <- 1  
+adjPval_threshold <- 0.05  
+```
+
+```{r}
+## remove NA values from results
+#res <- na.omit()
+
+## calculate min/max axis values for plot
+min_width <- min(volcano_data$logFC)
+max_width <- max(volcano_data$logFC)
+max_height <- -log10(min(volcano_data[volcano_data$adj.P.Val>0, 5]))
+
+## Grab top 10 up-reg genes for plot
+up <- subset(volcano_data, volcano_data$logFC > 1 & volcano_data$adj.P.Val <= 0.05)
+up <- up[order(-up$logFC),]
+up_list <- head(rownames(up), n=10L)
+
+## Grab top 10 down-reg genes for plot
+down <- subset(volcano_data, volcano_data$logFC < -1 & volcano_data$adj.P.Val <= 0.05)
+down <- down[order(down$logFC),]
+down_list <- head(rownames(down), n=10L)
+
+# Appending the statistically significant genes to up_list
+new_entries <- c("PLAUR", "CXCL9", "GBP5", "IL12A", "TEAD4", "IL27RA")
+up_list <- c(up_list, new_entries)
+
+## place top 20 DE genes in vector
+plot_top_20 <- c(up_list, down_list)
+
+EnhancedVolcano(volcano_data,
+                lab=rownames(volcano_data),
+                x="logFC",
+                y="adj.P.Val",
+                selectLab=plot_top_20,
+                drawConnectors=TRUE,
+                legendPosition = "none",
+                FCcutoff=1.0,
+                pCutoff=0.05,
+                title="Volcano Plot",
+                subtitle="Outlier Samples vs. Others",
+                caption = paste0('Total Genes = ', nrow(volcano_data)),
+                xlim=c(min_width, max_width),
+                ylim=c(0, max_height),
+                max.overlaps = Inf)
+```
+These 3 samples had severe disease, stage 3 and stage 4 (x2).
+
+Thymosin beta 10 (TMSB10) has been demonstrated to be involved in the malignant process of many cancers. "We found TMSB10 was upregulated in breast cancer cells and tissues. Univariate and multivariate analysis demonstrated that high TMSB10 expression significantly correlated with clinicopathological features, poor prognosis and distant metastases in patients with breast cancer." ~ Zhang et al., 2017.
+
+"Collagens and fibronectin are the main structural constituents of ECM. Type I and III collagens (col1 and col3) are highly expressed in liver capsule, portal stroma, Disse’s space and fibroid tissue7,8. Type IV collagen (col4) and laminins make up the basal lamina of the blood vessels and bile ducts8. Type V collagen (col5) forms thin fibers located in the centre of thick col1 and col3 fibrils. It is notable that more than five-fold increase in collagen deposition has been found in fibrotic livers compared to a healthy organ. Fibronectin is a glycoprotein that can be found in the liver capsule, portal stroma and Disse’s space. In normal adult tissues its levels are modest but increase rapidly during tissue regeneration10. Recent studies showed that the absence of fibronectin in liver leads to more extensive liver cirrhosis induced by liver damage and was accompanied by increased liver stiffness and disorganized collagen network." ~ Klaas et al., 2016
+Sample A5OG has distant metastases in the liver, which had possibly induced liver damage, leading to upregulation of collagin and fibronectin, as seen in the upregulated genes.
+
+NCBI - GBP5 promotes liver injury and inflammation by inducing hepatocyte apoptosis. Structural basis for GTP-induced dimerization and antiviral function of guanylate-binding proteins. GBP5 drives malignancy of glioblastoma via the Src/ERK1/2/MMP3 pathway.
+
+"Ferritin is a 450 kDa protein constituted by 24 subunits of H‐ferritin and L‐ferritin encoded by the FTH1 (ferritin heavy chain 1) and FTL (ferritin light chain) genes located on chromosome 11 and 19, respectively. Ferritin is a cytoplasmic iron storage protein critical for the maintenance of iron homeostasis and protection of cells from oxidative damage. Ferritin is also found in the nucleus with additional functions such as transcriptional regulation, and a mitochondrial ferritin encoded by a distinct gene in 5q23.1 has been recently described. Besides its role in iron storage, ferritin is also involved in several biological processes including angiogenesis, cell proliferation, cell death (eg, ferroptosis) immunosuppression or chemoresistance in an iron‐dependent or iron‐independent manner. This is particularly the case in the context of cancer in which ferritin expression is regulated by inflammatory cytokines through the activation of nuclear factor kappa B (NF‐κB) signaling, oxidative stress, growth factors such as insulin‐like growth factor (IGF‐1) or hypoxia. In addition to its intracellular localizations, ferritin is also found in extracellular compartments, such as the serum where it has low iron content and a distinct subunit composition enriched in L‐ferritin. Serum ferritin is significantly affected by acute and chronic inflammation with sometimes considerable variations and frequently increased at diagnosis in several cancers. It has been shown that these elevations are independent of variations in body iron stores and that higher levels are associated with high‐risk features and poor prognosis." ~ Bertoli et al., 2018.
+
+"The gene plasminogen activator urokinase receptor (PLAUR) encodes a glycosyl-phosphatidylinositol–anchored membrane protein named urokinase plasminogen activator receptor. The urokinase-type plasminogen activation system plays a key role in tissue remodeling and extracellular matrix degradation, which leads to invasion and metastasis, a pivotal characteristic of malignant tumors. Overexpression of the urokinase plasminogen activator receptor has been determined in many malignant tumors, and inhibition of PLAUR can decrease tumor invasion, metastasis, and angiogenesis. In addition, some studies have indicated that tumoral and macrophage PLAUR can promote tumor invasiveness and that macrophages can increase the expression of PLAUR in tumor cells. These results suggested that PLAUR may be involved in tumor immunity" ~ Zeng et al., 2021.
+
+"CXCL9, also known as monokine induced by gamma-interferon (MIG), can be produced during inflammatory conditions by myeloid cells within the tumor microenvironment. It attracts cells expressing the CXCR3 receptor including activated T and NK cells and has been shown to play a role in responses to immune checkpoint therapy. Overexpression of CXCL9 has also shown to reduce tumor progression and metastasis via the inhibition of angiogenesis. Conversely, CXCL9 can act directly on tumor cells expressing the CXCR3 receptor to promote cell migration and epithelial mesenchymal transition." ~ Neo et al., 2020.
+
+"TEA domain transcription factor 4 (TEAD4) is an important member of the TEAD family. As a downstream effector of the Hippo pathway, TEAD4 has essential roles in cell proliferation, cell survival, tissue regeneration, and stem cell maintenance. TEAD4 contains a TEA DNA binding domain that binds the promoters of target genes and a Yes-associated protein/transcriptional co-activator with PDZ-binding motif (YAP/TAZ) binding domain that associates with transcriptional cofactors. TEAD4 coordinates with YAP, TAZ, VGLL, and other transcription factors to regulate different cellular processes in cancer via its transcriptional output. Moreover, TEAD4 undergoes post-translational modifications and subcellular translocations, and both processes have been shown to shed new insights on how TEAD transcriptional activity can be modified. In summary, TEAD4 has important roles in cancer, including epithelial–mesenchymal transition (EMT), metastasis, cancer stem cell dynamics, and chemotherapeutic drug resistance, suggesting that TEAD4 may be a promising prognostic biomarker in cancer." ~ Chen et al., 2020.
+
+"Based on insights generated by XAI, we discovered that IL27RA is the most prominent cancer promoting biomarker associated with lower survival probabilities in HGSC patients." "The biology of IL27 is complex and context dependent – it may either dampen or promote different types of inflammation or cancer. Recently, an experimental study revealed that IL27 receptor signaling promotes hepatocellular carcinoma, and high expression correlated with poor prognosis for patients due to increased proliferative capacity of tumors and inflammation - thus further validating that the explanations obtained from XAI are, in fact, legitimate." ~ Chakraborty et al., 2023
+
+```{r}
+# Heatmap of DE gene expression for top 50 genes in the outliers compared to all other samples (n=36) 
+
+# top differentially expressed genes
+top_genes <- rownames(top_table)[1:25]  # Top 50 genes as an example
+expression_matrix <- combined_expression[top_genes,]
+
+# Scale the expression data
+scaled_expression <- t(scale(t(expression_matrix)))
+
+# Ensure group variable is correctly defined
+group <- factor(c(rep("Outlier", length(expression_outliers)), rep("Other", length(expression_others))))
+
+# Create a named vector for group annotations
+group_annotations <- data.frame(Group = group)
+rownames(group_annotations) <- colnames(expression_matrix)
+
+# Check that the rownames of group_annotations match the colnames of expression_matrix
+stopifnot(identical(rownames(group_annotations), colnames(expression_matrix)))
+
+# Create the heatmap
+pheatmap(scaled_expression, 
+         annotation_col = group_annotations,
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         main = "  Top 25 Differentially Expressed Genes In Outliers vs Other Samples",
+         color = hcl.colors(100, "GnBu",rev=F))
+
+```
+
+```{r}
+# Extracting upregulated genes function
+
+get_upregulated <- function(df){
+    key <- intersect(rownames(df)[which(df$log2FoldChange>=1)], rownames(df)[which(df$pvalue<=0.05)])
+  results <- as.data.frame((df)[which(rownames(df) %in% key),])
+    return(results)
+}
+```
+
+```{r}
+# Extracting downregulated genes function
+
+get_downregulated <- function(df){
+    key <- intersect(rownames(df)[which(df$log2FoldChange<=-1)], rownames(df)[which(df$pvalue<=0.05)])
+    results <- as.data.frame((df)[which(rownames(df) %in% key),])
+    return(results)
+}
+```
+
+```{r}
+# Annotating DE genes function
+
+annotate_de_genes <- function(df){
+
+    df$hgnc_symbol <- rownames(df)
+    mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+    info <- getBM(attributes=c("hgnc_symbol",
+                               "ensembl_gene_id_version",
+                               "chromosome_name",
+                               "start_position",
+                               "end_position",
+                               "strand",
+                               "entrezgene_description"),
+                  filters = c("hgnc_symbol"),
+                  values = df$hgnc_symbol,
+                  mart = mart,
+                  useCache=FALSE)
+
+    tmp <- merge(df, info, by="hgnc_symbol")
+    tmp$strand <- gsub("-1", "-", tmp$strand)
+    tmp$strand <- gsub("1", "+", tmp$strand)
+    tmp$hgnc_symbol <- make.names(tmp$hgnc_symbol, unique = T)
+    tmp <- tmp[!grepl("CHR", tmp$chromosome_name),]
+
+    output_col <- c("Gene", "Ensembl ID", "Chromosome", "Start", "Stop", "Strand", "Description", "Log2FC", "P-value", "Adj P-value")
+    tmp <- subset(tmp, select=c(hgnc_symbol, ensembl_gene_id_version, chromosome_name, start_position, end_position, strand, entrezgene_description, log2FoldChange, pvalue, padj))
+    colnames(tmp) <- output_col
+
+    if(min(tmp$Log2FC) > 0){
+        tmp <- tmp[order(-tmp$Log2FC),]
+    }else{
+        tmp <- tmp[order(tmp$Log2FC),]
+    }
+
+    return(tmp)
+
+}
+```
+
+```{r}
+# Writing DE results
+
+de_up <- get_upregulated(as.data.frame(res))
+de_down <- get_downregulated(as.data.frame(res))
+upregulated_genes <- annotate_de_genes(de_up)
+downregulated_genes <- annotate_de_genes(de_down)
+```
+
+```{r}
+#confirm these worked
+head(upregulated_genes)
+head(downregulated_genes)
+```
+
+RESULTS PLOTS
+
+```{r}
+# Volcano plot
+
+## remove NA values from results
+res <- na.omit(res)
+
+## calculate min/max axis values for plot
+min_width <- min(res$log2FoldChange)
+max_width <- max(res$log2FoldChange)
+max_height <- -log10(min(res[res$pvalue>0, 5]))
+
+## Grab top 10 up-reg genes for plot
+up <- subset(res, res$log2FoldChange > 1 & res$pvalue <= 0.05)
+up <- up[order(-up$log2FoldChange),]
+up_list <- head(rownames(up), n=10L)
+
+## Grab top 10 down-reg genes for plot
+down <- subset(res, res$log2FoldChange < -1 & res$pvalue <= 0.05)
+down <- down[order(down$log2FoldChange),]
+down_list <- head(rownames(down), n=10L)
+
+# Appending the statistically significant genes to down_list
+new_entries <- c("MKI67", "CENPF", "CENPA", "PLK1", "CDK1", "CDKN3")
+down_list <- c(down_list, new_entries)
+
+## place top 20 DE genes in vector
+plot_top_20 <- c(up_list, down_list)
+
+EnhancedVolcano(res,
+                lab=rownames(res),
+                x="log2FoldChange",
+                y="pvalue",
+                selectLab=plot_top_20,
+                drawConnectors=TRUE,
+                legendPosition = "none",
+                FCcutoff=1.0,
+                pCutoff=0.05,
+                title="Volcano Plot",
+                subtitle="High MKI67 vs. Low MKI67",
+                caption = paste0('Total Genes = ', nrow(res)),
+                xlim=c(min_width, max_width),
+                ylim=c(0, max_height),
+                max.overlaps = Inf)
+```
+
+The y-axis shows how statistically significant the gene expression differences are: more statistically significant genes will be towards the top (lower p-values)
+The x-axis shows how big the difference in gene expression is (fold change)
+Positive fold change means the gene is upregulated in the low expression group compared to the high expression group.
+Negative fold change means the gene is downregulated in the low expression group compared to the high expression group.
+Fold change of near 0 means there are no big differences in gene expression.
+
+```{r}
+# Heatmap of DE gene expression for each patient across high and low MKI67 expression subcohorts
+
+# selecting DE genes that passed the filtering our function produced
+up <- rownames(de_up)
+down <- rownames(de_down)
+
+# subset matrix to include only DE genes
+key <- c(up, down)
+subset <- rld_counts[which(rownames(rld_counts) %in% key),]
+
+# scale and center the values
+mat <- as.matrix(scale(t(subset), center = T))
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(mat)
+
+pheatmap(t(mat), 
+         show_rownames = FALSE,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         color = hcl.colors(100, "GnBu",rev=F))
+```
+
+**PATHWAY ENRICHMENT ANALYSIS (GENE SET ENRICHMENT ANALYSIS) USING HALLMARK GENE SETS**
+
+```{r}
+# converting results object to dataframe
+res1 <- as.data.frame(res) 
+res1$hgnc_symbol <- rownames(res1)
+```
+
+```{r}
+# computing summary stat
+fgsea_rank <- res1 %>%
+              dplyr::select(hgnc_symbol, log2FoldChange) %>%
+              na.omit() %>%
+              distinct() %>%
+              group_by(hgnc_symbol) %>%
+              summarize(stat=mean(log2FoldChange))
+
+head(fgsea_rank)
+```
+
+```{r}
+# creating a named list
+rank <- deframe(fgsea_rank)
+head(rank, 20)
+```
+
+```{r}
+# read in gmt file
+hallmark_pathway <- gmtPathways("/home/evannaughton/Downloads/h.all.v2023.2.Hs.symbols.gmt")
+head(hallmark_pathway, 1)
+```
+
+```{r}
+# run fgsea
+fgsea <- fgsea(pathways=hallmark_pathway, stats=rank, nperm=1000)
+
+fgseaResTidy <- fgsea %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+# Show in a nice table:
+fgseaResTidy %>%
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>%
+  arrange(padj) %>%
+  DT::datatable()
+```
+
+ENRICHMENT PLOTS
+
+```{r}
+# Pathways enriched in the low expression samples
+
+filtered_pathway <- subset(fgsea, NES > 1)
+filtered_pathway
+```
+
+```{r}
+# Enrichment plots for pathways upregulated in low expression samples (downregulated in high expression samples)
+
+filt_up_low <- as.vector(filtered_pathway$pathway)
+
+for (i in filt_up_low){
+    plt <- plotEnrichment(pathway = hallmark_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Pathways enriched in the high expression samples
+
+filtered_pathway_high <- subset(fgsea, NES < -1.4)
+filtered_pathway_high
+```
+
+```{r}
+# Enrichment plots for pathways upregulated in high expression samples (downregulated in low expression samples)
+
+filt_up_high <- as.vector(filtered_pathway_high$pathway)
+
+for (i in filt_up_high){
+    plt <- plotEnrichment(pathway = hallmark_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Add a column to indicate the group
+filtered_pathway$group <- "Low"
+filtered_pathway_high$group <- "High"
+
+# Combine the data frames
+combined_pathways <- rbind(filtered_pathway, filtered_pathway_high)
+
+# Arrange data for plotting
+combined_pathways <- combined_pathways %>%
+  mutate(pathway = factor(pathway, levels = unique(pathway[order(NES)])))
+
+# Create the plot
+ggplot(combined_pathways, aes(x = pathway, y = NES, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Low" = "turquoise", "High" = "red")) +
+  labs(x = "Pathway", y = "NES", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.title.y = element_blank(),
+        legend.position = "top") +
+    ggtitle("Hallmark Enriched Pathways")
+```
+
+**PATHWAY ENRICHMENT ANALYSIS (GENE SET ENRICHMENT ANALYSIS) USING GENE ONTOLOGY GENE SETS**
+
+```{r}
+# read in gmt file
+GO_pathway <- gmtPathways("/home/evannaughton/Downloads/c5.go.v2023.2.Hs.symbols.gmt")
+head(GO_pathway, 1)
+```
+
+```{r}
+# run fgsea
+fgsea2 <- fgsea(pathways=GO_pathway, stats=rank, nperm=1000)
+
+fgseaResTidy <- fgsea2 %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+# Show in a nice table:
+fgseaResTidy %>%
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>%
+  arrange(padj) %>%
+  DT::datatable()
+```
+
+```{r}
+# Pathways enriched in the low expression samples
+
+filtered_pathway2 <- subset(fgsea2, NES > 2.05)
+filtered_pathway2
+```
+
+```{r}
+# Enrichment plots for pathways upregulated in low expression samples (downregulated in high expression samples)
+
+filt_up_low <- as.vector(filtered_pathway2$pathway)
+
+for (i in filt_up_low){
+    plt <- plotEnrichment(pathway = GO_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Pathways enriched in the high expression samples
+
+filtered_pathway_high2 <- subset(fgsea2, NES < -2.525)
+filtered_pathway_high2
+```
+
+```{r}
+filt_up_high <- as.vector(filtered_pathway_high2$pathway)
+
+for (i in filt_up_high){
+    plt <- plotEnrichment(pathway = GO_pathway[[i]],
+    gseaParam = 1, ticksSize = 0.5, stats= rank) +
+    labs(title=i) + theme(plot.title = element_text(hjust = 0.5, face="bold"))
+    print(plt)
+}
+```
+
+```{r}
+# Add a column to indicate the group
+filtered_pathway2$group <- "Low"
+filtered_pathway_high2$group <- "High"
+
+# Combine the data frames
+combined_pathways2 <- rbind(filtered_pathway2, filtered_pathway_high2)
+
+# Arrange data for plotting
+combined_pathways2 <- combined_pathways2 %>%
+  mutate(pathway = factor(pathway, levels = unique(pathway[order(NES)])))
+
+# Create the plot
+ggplot(combined_pathways2, aes(x = pathway, y = NES, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(values = c("Low" = "turquoise", "High" = "red")) +
+  labs(x = "Pathway", y = "NES", fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10),
+        axis.title.y = element_blank(),
+        legend.position = "top") +
+    ggtitle("GOBP Enriched Pathways")
+```
+
+**Analysing microRNAs (miRNAs) and how they differ across high / low MKI67 expression cohorts.**
+
+miRNAs: Data unavailable on cBioportal for ACC so obtained data from Genomic Data Commons (GDC) for these same samples.
+
+```{r}
+# Creating a dataframe out of the miRNA sample folders
+
+data_dir <- "/home/evannaughton/project/miRNA_data/"
+
+folders <- list.dirs(data_dir, recursive = FALSE)
+
+read_miRNA_data <- function(folder_path) {
+  files <- list.files(folder_path, full.names = TRUE)
+  sample_id <- basename(folder_path)
+  data <- read.table(files[1], header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  data <- data %>% select(miRNA_ID, read_count)
+  colnames(data)[2] <- sample_id
+  return(data)
+}
+
+all_data <- lapply(folders, read_miRNA_data)
+combined_data <- Reduce(function(x, y) full_join(x, y, by = "miRNA_ID"), all_data)
+```
+
+```{r}
+# Subsetting data so I just have samples belonging to quartile 1 & quartile 4
+
+# Subset combined_data for 1st quartile
+combined_data_quartile1 <- combined_data[, quartile1_ids]
+
+# Subset gdata for 4th quartile
+combined_data_quartile4 <- combined_data[, quartile4_ids]
+```
+
+```{r}
+# Extract miRNA_ID column from the original combined_data dataframe
+miRNA_identifier <- combined_data[, c("miRNA_ID")]
+
+# Combine expression data columns for low and high samples
+countData <- cbind(miRNA_identifier, combined_data_quartile1, combined_data_quartile4)
+```
+
+Using this dataframe along with the previous sample_metadata file, it is possible to use DESeq to carry out differential miRNA expression analysis between the high and low MKI67 expression subcohorts.
+
+```{r}
+# Setting miRNA IDs as rownames
+
+rownames(countData) = make.names(countData$miRNA_identifier)
+
+# The warning message is just indicating that upon creating rownames, it has converted the "-" in each miRNA Identifier to ".". 
+```
+
+```{r}
+# Removing unneccesarry columns
+
+countData <- subset(countData, select = -miRNA_identifier)
+```
+
+```{r}
+# converting countdata and metaData to matrix
+
+countdata <- as.matrix(countData)
+class(countdata)
+
+metadata2 <- as.matrix(metaData)
+class(metadata2)
+
+ncol(countdata) == nrow(metaData)
+```
+
+```{r}
+# creating DESeq object
+
+dds <- DESeqDataSetFromMatrix(countData = countdata, colData=metadata2, design=~condition, tidy = FALSE)
+
+dds
+```
+
+```{r}
+# Running DESeq
+
+dds <- DESeq(dds)
+```
+
+```{r}
+# results table
+
+res <- results(dds)
+head(results(dds, tidy=TRUE))
+```
+
+```{r}
+# summary table
+
+summary(res)
+```
+
+```{r}
+# Sort summary list by p-value
+
+res <- res[order(res$padj),]
+top50 <- head(res, 50)
+
+print(head(top50))
+```
+
+```{r}
+# Top 50 statistically significant miRNAs
+
+print(rownames(top50))
+```
+
+```{r}
+# Searching for some known miRNAs in aggressive ACC
+
+# List of miRNAs to search for
+search_miRNAs <- c("hsa.mir.483.5p", "hsa.mir.503", "hsa.mir.210", "hsa.mir.139.5p", "hsa.mir.195")
+
+# Convert DESeqResults object to dataframe
+res_df <- as.data.frame(res)
+
+# Filter the dataframe using rownames
+filtered_res <- res_df[rownames(res_df) %in% search_miRNAs, ]
+
+# View the filtered results
+print(filtered_res)
+```
+
+```{r}
+# plotCounts
+
+par(mfrow=c(2,3))
+
+plotCounts(dds, gene="hsa.mir.130b", intgroup="condition")
+plotCounts(dds, gene="hsa.mir.4746", intgroup="condition")
+plotCounts(dds, gene="hsa.mir.106b", intgroup="condition")
+plotCounts(dds, gene="hsa.mir.653", intgroup="condition")
+plotCounts(dds, gene="hsa.mir.135b", intgroup="condition")
+plotCounts(dds, gene="hsa.mir.489", intgroup="condition")
+```
+
+```{r}
+# Quality control
+
+# Extract miRNA counts from the DDS object.
+
+counts <- counts(dds, normalized=TRUE)
+```
+
+```{r}
+# Transform Counts We’ll look at two transformations: log2(), and rlog().
+
+log2_counts <- assay(normTransform(dds))
+rld_counts <- assay(rlog(dds))
+
+# Log2 + PC Transformation
+
+log2_plt <- meanSdPlot(log2_counts, ranks=FALSE, plot=FALSE)
+log2_plt$gg + ggtitle("Log2 + PC Transformation") + xlim(0,20)
+```
+
+```{r}
+# Rlog Transformation
+
+rld_plt <- meanSdPlot(rld_counts, ranks=FALSE, plot=FALSE)
+rld_plt$gg + ggtitle("Rlog Transformation") + xlim(0,20)
+```
+
+```{r}
+# Sample Heatmap
+
+# Calculate distance between samples
+sampleDists <- dist(t(rld_counts))
+
+# Place distances in matrix
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(sampleDistMatrix)
+
+pheatmap(mat=sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         col=hcl.colors(100,"BluYl",rev=T),
+         width = 25,  
+         height = 45, 
+         fontsize_row = 7,  
+         fontsize_col = 7   
+)
+```
+
+```{r}
+# Creating a PCA bi-plot
+
+p <- pca(rld_counts, metadata = metadata2)
+biplot(p,
+       colby = 'condition',
+       colkey = c('high'='red', 'low'='turquoise'),
+       hline = 0,
+       vline = 0,
+       legendPosition = 'right',
+       legendLabSize = 12,
+       legendIconSize = 8.0,
+       title = 'PCA bi-plot',
+       subtitle = 'PC1 versus PC2')
+```
+
+```{r}
+#Creating a 3D PCA plot
+metadata2 <- as.data.frame(metadata2)
+
+# Identify columns with zero variance
+zero_variance_columns <- apply(rld_counts, 2, var) == 0
+print(paste("Zero-variance columns:", sum(zero_variance_columns)))
+
+# Remove zero-variance columns
+rld_counts_filtered <- rld_counts[, !zero_variance_columns]
+
+# Identify rows with zero variance
+zero_variance_rows <- apply(rld_counts_filtered, 1, var) == 0
+print(paste("Zero-variance rows:", sum(zero_variance_rows)))
+
+# Remove zero-variance rows
+rld_counts_filtered <- rld_counts_filtered[!zero_variance_rows, ]
+
+# Verify dimensions of the filtered data
+print(dim(rld_counts_filtered))
+
+# Calculate PCA on the filtered data
+pca_result <- prcomp(t(rld_counts_filtered), scale = TRUE)
+
+# Extract the first three PCs
+pca_data <- data.frame(pca_result$x[, 1:3])
+pca_data$condition <- metadata2$condition  
+
+# Create a 3D scatter plot
+fig <- plot_ly(pca_data, x = ~PC1, y = ~PC2, z = ~PC3, color = ~condition, colors = c('red', 'turquoise')) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'PC1'),
+                      yaxis = list(title = 'PC2'),
+                      zaxis = list(title = 'PC3')),
+         title = "3D PCA Plot")
+
+fig
+```
+
+```{r}
+# Creating a 3D PCA plot
+metadata2 <- as.data.frame(metadata2)
+
+# Identify columns with zero variance
+zero_variance_columns <- apply(rld_counts, 2, var) == 0
+print(paste("Zero-variance columns:", sum(zero_variance_columns)))
+
+# Remove zero-variance columns
+rld_counts_filtered <- rld_counts[, !zero_variance_columns]
+
+# Identify rows with zero variance
+zero_variance_rows <- apply(rld_counts_filtered, 1, var) == 0
+print(paste("Zero-variance rows:", sum(zero_variance_rows)))
+
+# Remove zero-variance rows
+rld_counts_filtered <- rld_counts_filtered[!zero_variance_rows, ]
+
+# Verify dimensions of the filtered data
+print(dim(rld_counts_filtered))
+
+# Calculate PCA on the filtered data
+pca_result <- prcomp(t(rld_counts_filtered), scale = TRUE)
+
+# Extract the first three PCs
+pca_data <- data.frame(pca_result$x[, 1:3])
+pca_data$condition <- metadata2$condition
+pca_data$sample_id <- rownames(metadata2) # Add sample IDs to pca_data
+
+# Create a 3D scatter plot
+fig <- plot_ly(pca_data, x = ~PC1, y = ~PC2, z = ~PC3, color = ~condition, colors = c("red", "turquoise")) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'PC1'),
+                      yaxis = list(title = 'PC2'),
+                      zaxis = list(title = 'PC3')),
+         title = "3D PCA Plot")
+
+# Add text annotations for the specified sample IDs
+highlight_samples <- c("TCGA.OR.A5J8.01", "TCGA.OR.A5JB.01", "TCGA.OR.A5OG.01")
+highlight_data <- pca_data[pca_data$sample_id %in% highlight_samples, ]
+
+fig <- fig %>% add_text(data = highlight_data, 
+                        x = ~PC1, y = ~PC2, z = ~PC3, 
+                        text = ~sample_id, 
+                        textposition = "top right", 
+                        textfont = list(color = "black", size = 12))
+
+fig
+```
+
+```{r}
+# Volcano plot
+
+## remove NA values from results
+res <- na.omit(res)
+
+## calculate min/max axis values for plot
+min_width <- min(res$log2FoldChange)
+max_width <- max(res$log2FoldChange)
+max_height <- -log10(min(res[res$pvalue>0, 5]))
+
+## Grab top 10 up-reg miRNAs for plot
+up <- subset(res, res$log2FoldChange > 1 & res$pvalue <= 0.05)
+up <- up[order(-up$log2FoldChange),]
+up_list <- head(rownames(up), n=10L)
+
+## Grab top 10 down-reg miRNAs for plot
+down <- subset(res, res$log2FoldChange < -1 & res$pvalue <= 0.05)
+down <- down[order(down$log2FoldChange),]
+down_list <- head(rownames(down), n=10L)
+
+# Appending the statistically significant miRNAs to down_list
+new_entries <- c("hsa.mir.130b", "hsa.mir.4746", "hsa.mir.106b", "hsa.mir.653", "hsa.mir.135b", "hsa.mir.489", "hsa.mir.362", "hsa.mir.301b")
+down_list <- c(down_list, new_entries)
+
+## place top 40 DE genes in vector
+plot_top_20 <- c(up_list, down_list)
+
+EnhancedVolcano(res,
+                lab=rownames(res),
+                x="log2FoldChange",
+                y="pvalue",
+                selectLab=plot_top_20,
+                drawConnectors=TRUE,
+                legendPosition = "none",
+                FCcutoff=1.0,
+                pCutoff=0.05,
+                title="Volcano Plot (miRNAs)",
+                subtitle="High MKI67 vs. Low MKI67",
+                caption = paste0('Total miRNAs = ', nrow(res)),
+                xlim=c(min_width, max_width),
+                ylim=c(0, max_height),
+                max.overlaps = Inf)
+```
+
+```{r}
+# Heatmap of DE miRNA expression for each patient across high and low MKI67 expression subcohorts
+
+# Writing DE results
+
+de_up <- get_upregulated(as.data.frame(res))
+de_down <- get_downregulated(as.data.frame(res))
+
+# selecting DE miRNAs that passed the filtering our function produced
+up <- rownames(de_up)
+down <- rownames(de_down)
+
+# subset matrix to include only DE miRNAs
+key <- c(up, down)
+subset <- rld_counts[which(rownames(rld_counts) %in% key),]
+
+# scale and center the values
+mat <- as.matrix(scale(t(subset), center = T))
+
+# create annotation dataframe
+ann <- data.frame(condition = metadata2[, "condition"])
+
+col <- c("turquoise", "red")
+names(col) <- c("low", "high")
+ann_col <- list(condition = col)
+
+# match annotation rownames to distance mat
+rownames(ann) <- rownames(mat)
+
+pheatmap(t(mat), 
+         show_rownames = FALSE,
+         annotation_col = ann,
+         annotation_colors = ann_col,
+         color = hcl.colors(100, "BluYl",rev=F))
+```
+
+Clustering looks good here considering n is small!
+
+**Differential Protein Expression Analysis**
+
+```{r}
+# Reading in the protein expression data
+
+pdata <- read.delim("/home/evannaughton/project/acc_tcga/data_rppa.txt", header = T)
+head(pdata)
+```
+
+```{r}
+# Subsetting data so I just have samples belonging to quartile 1 & quartile 4
+
+# Check if sample IDs are correctly matching the column names
+matching_quartile1_ids <- intersect(quartile1_ids, colnames(pdata))
+matching_quartile4_ids <- intersect(quartile4_ids, colnames(pdata))
+
+# Subset pdata for 1st quartile
+pdata_quartile1 <- pdata %>% select(Composite.Element.REF, all_of(matching_quartile1_ids))
+
+# Subset pdata for 4th quartile
+pdata_quartile4 <- pdata %>% select(Composite.Element.REF, all_of(matching_quartile4_ids))
+```
+
+```{r}
+# Extract miRNA_ID column from the original combined_data dataframe
+protein_identifier <- pdata[, c("Composite.Element.REF")]
+
+# Combine expression data columns for low and high samples
+countData <- cbind(protein_identifier, pdata_quartile1, pdata_quartile4)
+```
+
+Using this dataframe along with the previous sample_metadata file, it is possible to use DESeq to carry out differential protein expression analysis between the high and low MKI67 expression subcohorts.
+
+```{r}
+# Setting miRNA IDs as rownames
+
+rownames(countData) = make.names(countData$protein_identifier)
+
+# The warning message is just indicating that upon creating rownames, it has converted the "-" in each miRNA Identifier to ".". 
+```
+
+```{r}
+# Removing unneccesarry columns
+
+countData <- subset(countData, select = -protein_identifier)
+countData <- subset(countData, select = -Composite.Element.REF)
+```
+
+```{r}
+countData <- subset(countData, select = -Composite.Element.REF.1)
+```
+
+```{r}
+# converting countdata and metaData to matrix
+
+countdata <- as.matrix(countData)
+class(countdata)
+
+metadata2 <- as.data.frame(metaData)
+class(metadata2)
+
+ncol(countdata) == nrow(metadata2)
+```
+
+```{r}
+colnames_countdata <- colnames(countdata)
+print(colnames_countdata)
+```
+
+```{r}
+rownames_metadata2 <- rownames(metadata2)
+print(rownames_metadata2)
+```
+
+```{r}
+# Ensure metadata2 is a data frame
+metadata2 <- as.data.frame(metadata2)
+
+# Ensure that the row names of metadata2 match the column names of countdata
+common_samples <- intersect(colnames(countdata), rownames(metadata2))
+
+# Subset both countdata and metadata2 to include only common samples
+countdata_filtered <- countdata[, common_samples]
+metadata2_filtered <- metadata2[common_samples, ]
+
+# Check dimensions
+print(dim(countdata_filtered))
+print(dim(metadata2_filtered))
+```
+
+```{r}
+# Create the design matrix
+group <- factor(metadata2_filtered$condition)
+design <- model.matrix(~ group)
+```
+
+```{r}
+# Convert countdata to matrix
+countdata_matrix <- as.matrix(countdata_filtered)
+
+# Fit linear model
+fit <- lmFit(countdata_matrix, design)
+fit <- eBayes(fit)
+
+# Results
+top_results <- topTable(fit, number = Inf)
+print(top_results)
+```
+
+```{r}
+# Volcano plot
+
+# Prepare the data
+top_results$Protein <- rownames(top_results)
+res <- top_results
+
+# Remove NA values from results
+res <- na.omit(res)
+
+# Top 10 up-regulated and down-regulated proteins for highlighting
+up <- subset(res, res$logFC >= 1 & res$P.Value <= 0.05)
+up <- up[order(-up$logFC),]
+up_list <- head(rownames(up), n=10)
+
+down <- subset(res, res$logFC <= -1 & res$P.Value <= 0.05)
+down <- down[order(down$logFC),]
+down_list <- head(rownames(down), n=10)
+
+# Combine lists for highlighting
+highlight_list <- c(up_list, down_list)
+
+# Create the EnhancedVolcano plot for all proteins
+EnhancedVolcano(res,
+    lab = res$Protein,
+    x = 'logFC',
+    y = 'P.Value',
+    selectLab = highlight_list,  
+    drawConnectors = TRUE,
+    pCutoff = 0.05,
+    FCcutoff = 1.0,
+    title = "Volcano Plot (Proteins)",
+    subtitle = "High vs Low Expression",
+    caption = paste('Total proteins = ', nrow(res)),
+    xlim = c(min(res$logFC) - 1, max(res$logFC) + 1),
+    ylim = c(0, -log10(min(res$P.Value))),
+    max.overlaps = Inf)
+```
+
+The volcano plot compares protein expression between high and low MKI67 expression samples. Proteins with a positive log2 fold change (right side of the plot) are upregulated in low samples, while those with a negative log2 fold change (left side of the plot) are upregulated in high samples. Significant proteins (p-value < 0.05) with substantial fold changes (log2 fold change > 1 or < -1) are highlighted. For instance, proteins like PRKCA (PKC alpha pS657) and CDH1 (E-Cadherin) are upregulated in low samples, while CCNB1 (Cyclin B1) and TFRC (Transferrin Receptor) are upregulated in high samples.
+
+```{r}
+# Define significance thresholds
+pvalue_threshold <- 0.05
+
+# Filter significant proteins
+significant_proteins <- res[res$P.Value < pvalue_threshold, ]
+significant_proteins_names <- rownames(significant_proteins)
+
+# Prepare data for the heatmap
+heatmap_data <- countdata_matrix[significant_proteins_names, ]
+
+# Create annotation dataframe
+ann <- data.frame(condition = metadata2_filtered$condition)
+rownames(ann) <- rownames(metadata2_filtered)
+
+# Define colors for annotation
+ann_colors <- list(condition = c("low" = "turquoise", "high" = "red"))
+
+# Plot Heatmap with adjusted size, font size, and annotation
+pheatmap(heatmap_data, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE,
+         scale = "row", 
+         show_rownames = TRUE, 
+         show_colnames = TRUE,
+         main = "Heatmap of Significant Differentially Expressed Proteins",
+         fontsize_row = 6, 
+         fontsize_col = 8, 
+         width = 12,       
+         height = 25,     
+         annotation_col = ann, 
+         annotation_colors = ann_colors 
+)
+```
+
+
+
+```{r}
+# Plot PCA
+pca_result <- prcomp(t(countdata_matrix), scale. = TRUE)
+pca_data <- data.frame(Sample = rownames(pca_result$x),
+                       PC1 = pca_result$x[, 1],
+                       PC2 = pca_result$x[, 2],
+                       Group = metadata2_filtered$condition)
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  labs(title = "PCA Plot of Protein Expression",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+
+# Plot MA
+limma::plotMA(fit, main = "MA Plot", ylim = c(-5, 5))
+```
+
+The MA plot displays the log-fold changes (M) versus the average expression (A) for all proteins. Most points are centered around zero, indicating that many proteins have similar expression levels in both high and low samples. Proteins with higher average expression levels are distributed across the plot, and those with substantial log-fold changes (outliers) suggest significant differential expression. Positive log-fold change values indicate upregulation in low samples, while negative values indicate upregulation in high samples. This plot helps identify proteins with notable changes in expression between the conditions.

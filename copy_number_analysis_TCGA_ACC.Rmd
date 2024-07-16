@@ -1,0 +1,409 @@
+---
+title: "copy_number_analysis_TCGA_ACC"
+author: "Evan_Naughton"
+date: "2024-05-13"
+output: html_document
+---
+
+```{r}
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+```
+
+Values: -2 = homozygous deletion; -1 = hemizygous deletion; 0 = neutral / no change; 1 = gain; 2 = high level amplification.
+
+  -2 or Deep Deletion indicates a deep loss, possibly a homozygous deletion
+  -1 or Shallow Deletion indicates a shallow loss, possibley a heterozygous deletion
+   0 is diploid
+   1 or Gain indicates a low-level gain (a few additional copies, often broad)
+   2 or Amplification indicate a high-level amplification (more copies, often focal)
+
+```{r}
+# Reading in the clinical data
+
+finaldf <- read.table("/home/evannaughton/project/r_code/finaldf.txt", header = T)
+head(finaldf)
+```
+
+```{r}
+# Reading in the copy number data
+
+copy_number_data <- read.delim("/home/evannaughton/project/acc_tcga/data_cna.txt", header = T)
+head(copy_number_data)
+```
+
+```{r}
+# reading in the other copy number data
+
+copy_number_data_hg19 <- read.delim("/home/evannaughton/project/acc_tcga/data_cna_hg19.seg", header = T)
+head(copy_number_data_hg19)
+```
+
+```{r}
+# Cycling through copy number data to obtain MKI67 copy number for each patient
+
+# Identifying the MKI67 gene
+mki67 <- which(copy_number_data$Hugo_Symbol == "MKI67")
+
+# Extracting MKI67 copy number values for each sample
+mki67_cn <- copy_number_data[mki67, ]  
+
+mki67_cn <- mki67_cn[, -2]
+
+print(mki67_cn)
+```
+
+```{r}
+# Pivoting to long format
+
+long_df <- pivot_longer(mki67_cn, 
+                         cols = -Hugo_Symbol, 
+                         names_to = "Sample.ID",  
+                         values_to = "MKI67.Copy.Number")  
+
+long_df <- long_df[, c(2, 1, 3)]
+
+head(long_df)
+```
+
+```{r}
+# Merging dataframes
+
+# converting sample IDs to suitable format
+long_df$Sample.ID <- gsub("\\.", "-", long_df$Sample.ID)
+
+# removing Hugo_Symbol column
+long_df <- subset(long_df, select = -Hugo_Symbol)
+
+# Merged dataframes based on Sample_ID
+finaldf <- merge(finaldf, long_df, by = "Sample.ID", all = TRUE)
+
+# Remove rows with NA only in the Study.ID column
+finaldf <- subset(finaldf, !is.na(Study.ID))
+
+# merging dataframes based on MKI67.Copy.Number resulted in the loss of two samples as their MKI67 copy number information was not available (i.e. NA). Overcame this by merging all 91 samples with the finaldf and then removing the samples with NA in the Study.ID column. This resulted in a dataframe with all 79 patients with their respective MKI67 copy number along with the 2 samples with missing information for this variable.
+
+# Reset row indices
+rownames(finaldf) <- NULL
+```
+
+```{r}
+# reading in segmented copy number data file
+
+segmented_copy_number_data <- read.delim("/home/evannaughton/project/acc_tcga/data_cna_hg19.seg", header = T)
+head(segmented_copy_number_data)
+```
+
+```{r}
+# Separating the data based on quartiles
+
+quartile_data <- finaldf %>% 
+  filter(quartile %in% c(1, 4))
+
+# Turning quartile into a factor
+
+quartile_data$quartile <- as.factor(quartile_data$quartile)
+
+# Turning MKI67 CNA into a factor
+
+quartile_data$MKI67.Copy.Number <- as.factor(quartile_data$MKI67.Copy.Number)
+```
+
+```{r}
+# Bar plot comparing MKI67 CNA score on the x-axis with the categorical variable "Quartile" on the y-axis
+p <- ggplot(quartile_data, aes(x = factor(MKI67.Copy.Number), fill = factor(quartile))) +
+  geom_bar(position = position_dodge(preserve = "single"), color = "black", width = 0.7) +
+  scale_fill_manual(values = c("turquoise", "red"), name = "quartile") +
+  ggtitle("MKI67 CNA score vs. Sample Count For Each Quartile (1 = low; 4 = high)") +
+  labs(x = "MKI67 CNA Score", y = "Count For Each Quartile", 
+       caption = "-2 = homozygous deletion; -1 = hemizygous deletion; 0 = neutral / no change; 1 = gain; 2 = high level amplification") +
+  theme_minimal() +
+  theme(legend.position = "top")  # Adjust legend position
+
+# Display the plot
+print(p)
+```
+
+The fourth quartile (high MKI67 expression) is associated with higher genomic instability within the MKI67 gene than the low MKI67 expression quartile.
+
+PERFORMING DIFFERENTIAL COPY NUMBER ANALYSIS BETWEEN HIGH AND LOW GROUPS
+```{r}
+# Separating the data based on quartiles
+
+low_samples <- finaldf %>% 
+  filter(quartile %in% c(1))
+
+# Separating the data based on quartiles
+
+high_samples <- finaldf %>% 
+  filter(quartile %in% c(4))
+
+# Changing sample IDs to match the IDs in gdata
+
+low_samples$Sample.ID <- gsub("-", "\\.", low_samples$Sample.ID)
+head(low_samples)
+
+high_samples$Sample.ID <- gsub("-", "\\.", high_samples$Sample.ID)
+head(high_samples)
+```
+
+```{r}
+# Subset the data into high and low groups based on MKI67 expression levels
+
+# Identify Sample IDs in data_cna
+sample_ids_cna <- colnames(copy_number_data)[-c(1, 2)]  
+
+# Match sample IDs with those in clinical data
+high_sample_ids <- intersect(sample_ids_cna, high_samples$Sample.ID)
+low_sample_ids <- intersect(sample_ids_cna, low_samples$Sample.ID)
+
+# Subset data_cna to create high and low groups
+high_group <- copy_number_data[, c("Hugo_Symbol", "Entrez_Gene_Id", high_sample_ids)]
+low_group <- copy_number_data[, c("Hugo_Symbol", "Entrez_Gene_Id", low_sample_ids)]
+```
+
+```{r}
+#write.table(high_sample_ids, "/home/evannaughton/project/r_code/high_sample_ids", , sep="\t", quote = F)
+#write.table(low_sample_ids, "/home/evannaughton/project/r_code/low_sample_ids", , sep="\t", quote = F)
+```
+
+```{r}
+# Perform statistical test for each gene
+p_values <- numeric(nrow(high_group))
+for (i in 1:nrow(high_group)) {
+  high_values <- high_group[i, -c(1, 2)]
+  low_values <- low_group[i, -c(1, 2)]
+  p_values[i] <- t.test(high_values, low_values)$p.value
+}
+
+# Adjust p-values for multiple testing
+p_values_adjusted <- p.adjust(p_values, method = "BH")
+
+summary(p_values_adjusted)
+```
+
+The minumum p-value is 0.0692, indicating no statistical significance between any of the genes between the high and low groups in terms of copy number. Could increase the p-value, but this increases the chance of false positives.
+ 
+```{r}
+# Identify most significant genes
+significant_genes <- high_group[p_values_adjusted < 0.1, ]
+```
+
+```{r}
+# Seeing if any genes in the up_list or down_list are present in the most significantly DE copy number genes
+
+# Check if genes in up_list are present in Hugo_Symbol column
+up_genes_present <- significant_genes$Hugo_Symbol %in% up_list
+
+# Check if genes in down_list are present in Hugo_Symbol column
+down_genes_present <- significant_genes$Hugo_Symbol %in% down_list
+
+# Print genes present in up_list
+up_genes_in_significant <- significant_genes$Hugo_Symbol[up_genes_present]
+print(up_genes_in_significant)
+
+# Print genes present in down_list
+down_genes_in_significant <- significant_genes$Hugo_Symbol[down_genes_present]
+print(down_genes_in_significant)
+```
+
+When the p-value is set to 1, the only gene upregulated in the high samples that has a 'significant' difference between high and low groups in terms of copy number is MYH4.
+
+CNA scores betwen quartiles:
+
+```{r}
+# Read the CNA data 
+cna_data <- read.delim("/home/evannaughton/project/acc_tcga/data_cna.txt", check.names = FALSE)
+cna_hg19 <- read.delim("/home/evannaughton/project/acc_tcga/data_cna_hg19.seg")
+
+# View the first few rows to confirm the structure
+head(cna_data)
+head(cna_hg19)
+```
+
+
+```{r}
+# Calculating amplification score, deletion score and cna score
+
+# Remove the first two columns (Hugo_Symbol and Entrez_Gene_Id)
+cna_data <- cna_data[, -c(1, 2)]
+
+# Convert cna_data to a matrix
+cna_matrix <- as.matrix(cna_data)
+
+# Calculate amplification score (number of genes with score 1 or 2)
+amplification_score <- colSums(cna_matrix == 1 | cna_matrix == 2)
+
+# Calculate deletion score (number of genes with score -1 or -2)
+deletion_score <- colSums(cna_matrix == -1 | cna_matrix == -2)
+
+# Combine scores into a single data frame
+scores <- data.frame(
+  Sample = colnames(cna_matrix),
+  Amplification_Score = amplification_score,
+  Deletion_Score = deletion_score
+)
+
+# Add the new column "cna_score"
+scores <- scores %>%
+  mutate(cna_score = Amplification_Score + Deletion_Score)
+
+head(scores)
+```
+
+```{r}
+# Convert segment means to absolute copy numbers using the correct formula
+cna_hg19$abs_copy_number <- 2^(cna_hg19$seg.mean + 1)
+
+# Aggregate by sample to get the mean absolute copy number score
+absolute_copy_number_score <- cna_hg19 %>%
+  group_by(ID) %>%
+  summarise(Mean_Abs_Copy_Number = mean(abs_copy_number, na.rm = TRUE))
+
+# View the absolute copy number scores
+head(absolute_copy_number_score)
+```
+
+```{r}
+# Merge with the previous scores
+final_scores <- scores %>%
+  left_join(absolute_copy_number_score, by = c("Sample" = "ID"))
+
+# View the final scores
+head(final_scores)
+```
+
+```{r}
+# Rename the Sample column to Sample.ID
+colnames(final_scores)[colnames(final_scores) == "Sample"] <- "Sample.ID"
+
+# Merging absolute CNA scores to our finaldf dataframe
+
+# Merged dataframes based on Sample_ID
+finaldf <- merge(finaldf, final_scores, by = "Sample.ID", all = TRUE)
+
+# Remove rows with NA only in the Study.ID column
+finaldf <- subset(finaldf, !is.na(Study.ID))
+
+# Reset row indices
+rownames(finaldf) <- NULL
+```
+
+```{r}
+# Separating the data based on quartiles
+
+quartile_data <- finaldf %>% 
+  filter(quartile %in% c(1, 4))
+
+# Turning quartile into a factor
+
+quartile_data$quartile <- as.factor(quartile_data$quartile)
+```
+
+```{r}
+# boxplot (cna score)
+
+pCNA <- ggplot(quartile_data, aes(x = quartile, y = cna_score, color = quartile)) +
+  geom_boxplot(alpha = 0) +  
+  geom_point(position = position_jitter(width = 0.2), size = 3) +  
+  scale_color_manual(values = c("turquoise", "red")) +
+  labs(x = "Quartile (1 = low MKI67, 4 = high MKI67)", y = "CNA Score") +
+  ggtitle("CNA Score per MKI67 Expression Quartile") +
+  theme_minimal()
+
+# Calculate p-value between Quartile 1 and Quartile 4
+p_value <- t.test(cna_score ~ quartile, data = quartile_data)$p.value
+
+# Add p-value to the plot
+pCNA <- pCNA + annotate("text", x = 1.5, y = max(quartile_data$cna_score), 
+                  label = paste("p-value =", round(p_value, 4)), 
+                  hjust = 0.5, vjust = 1, size = 5, color = "black")
+
+print(pCNA)
+
+# Perform t-test
+t_test_result <- t.test(cna_score ~ quartile, data = quartile_data)
+
+print(t_test_result)
+```
+
+```{r}
+# boxplot (mean absolute cna score)
+p2 <- ggplot(quartile_data, aes(x = quartile, y = Mean_Abs_Copy_Number, color = quartile)) +
+  geom_boxplot(alpha = 0) +  
+  geom_point(position = position_jitter(width = 0.2), size = 3) +  
+  scale_color_manual(values = c("turquoise", "red")) +
+  labs(x = "Quartile (1 = low MKI67, 4 = high MKI67)", y = "Mean Absolute CNA Score") +
+  ggtitle("Mean Absolute CNA Score per MKI67 Expression Quartile") +
+  theme_minimal()
+
+# Calculate p-value between Quartile 1 and Quartile 4
+p_value <- t.test(Mean_Abs_Copy_Number ~ quartile, data = quartile_data)$p.value
+
+# Add p-value to the plot
+p2 <- p2 + annotate("text", x = 1.5, y = max(quartile_data$Mean_Abs_Copy_Number), 
+                  label = paste("p-value =", round(p_value, 4)), 
+                  hjust = 0.5, vjust = 1, size = 5, color = "black")
+
+print(p2)
+
+# Perform t-test
+t_test_result <- t.test(Mean_Abs_Copy_Number ~ quartile, data = quartile_data)
+
+print(t_test_result)
+```
+
+```{r}
+# boxplot (amplification score)
+p3 <- ggplot(quartile_data, aes(x = quartile, y = Amplification_Score, color = quartile)) +
+  geom_boxplot(alpha = 0) +  
+  geom_point(position = position_jitter(width = 0.2), size = 3) +  
+  scale_color_manual(values = c("turquoise", "red")) +
+  labs(x = "Quartile (1 = low MKI67, 4 = high MKI67)", y = "Amplification Score") +
+  ggtitle("Amplification Score per MKI67 Expression Quartile") +
+  theme_minimal()
+
+# Calculate p-value between Quartile 1 and Quartile 4
+p_value <- t.test(Amplification_Score ~ quartile, data = quartile_data)$p.value
+
+# Add p-value to the plot
+p3 <- p3 + annotate("text", x = 1.5, y = max(quartile_data$Amplification_Score), 
+                  label = paste("p-value =", round(p_value, 4)), 
+                  hjust = 0.5, vjust = 1, size = 5, color = "black")
+
+print(p3)
+
+# Perform t-test
+t_test_result <- t.test(Amplification_Score ~ quartile, data = quartile_data)
+
+print(t_test_result)
+```
+
+```{r}
+# boxplot (deletion score)
+p4 <- ggplot(quartile_data, aes(x = quartile, y = Deletion_Score, color = quartile)) +
+  geom_boxplot(alpha = 0) +  
+  geom_point(position = position_jitter(width = 0.2), size = 3) +  
+  scale_color_manual(values = c("turquoise", "red")) +
+  labs(x = "Quartile (1 = low MKI67, 4 = high MKI67)", y = "Deletion Score") +
+  ggtitle("Deletion Score per MKI67 Expression Quartile") +
+  theme_minimal()
+
+# Calculate p-value between Quartile 1 and Quartile 4
+p_value <- t.test(Deletion_Score ~ quartile, data = quartile_data)$p.value
+
+# Add p-value to the plot
+p4 <- p4 + annotate("text", x = 1.5, y = max(quartile_data$Deletion_Score), 
+                  label = paste("p-value =", round(p_value, 4)), 
+                  hjust = 0.5, vjust = 1, size = 5, color = "black")
+
+print(p4)
+
+# Perform t-test
+t_test_result <- t.test(Deletion_Score ~ quartile, data = quartile_data)
+
+print(t_test_result)
+```
+
