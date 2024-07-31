@@ -1,0 +1,85 @@
+---
+title: "Radiomics"
+author: "Evan_Naughton"
+date: "2024-05-29"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(glmnet)
+```
+
+```{r}
+# Reading in patient clinical data
+
+data <- read.csv("/home/evannaughton/Downloads/Adrenal-ACC-Ki67-Seg_SupportingData.csv", header = T)
+```
+
+```{r}
+# Visualising using a density plot with quantiles
+
+dens <- density(data$Ki67)
+plot(dens, main = "Density Plot of KI-67 Expression Across 53 TCIA Samples", xlab = "KI-67", ylab = "Density")
+
+quantiles <- quantile(data$Ki67, probs = c(0.25, 0.5, 0.75))
+abline(v = quantiles, col = c("blue", "red", "green"))
+
+legend("topright", legend = c("1st Quartile", "Median", "3rd Quartile"), col = c("blue", "red", "green"), lty = 1)
+```
+
+```{r}
+# Count samples below 1st quartile
+samples_below_1st_quartile <- sum(data$Ki67 < quantiles[1])
+
+# Count samples above 3rd quartile
+samples_above_3rd_quartile <- sum(data$Ki67 > quantiles[3])
+
+cat("Number of samples below the 1st quartile:", samples_below_1st_quartile, "\n")
+cat("Number of samples above the 3rd quartile:", samples_above_3rd_quartile, "\n")
+```
+
+```{r}
+# Adding quartile column to the data frame
+
+# Converting 'KI67' column to numeric
+data$Ki67<- as.numeric(as.character(data$Ki67))
+
+# Calculate quartiles and quintiles
+quartiles <- quantile(data$Ki67, probs = c(0, 0.25, 0.5, 0.75, 1))
+
+# Creating quartile column
+data$quartile <- cut(data$Ki67, breaks = quartiles, labels = FALSE)
+```
+
+```{r}
+# There was an NA value in the quartile column that needs to be changed to 1
+
+data <- data %>% mutate(quartile = ifelse(is.na(quartile) & Ki67 == 2.0, 1, quartile))
+```
+
+```{r}
+# Filtering the data for patients in quartiles 1 and 4
+
+quartile_data <- data %>% 
+  filter(quartile %in% c(1, 4))
+
+# Remove the specific sample
+quartile_data <- quartile_data %>% filter(Patient_ID != "Adrenal_Ki67_Seg_025")
+
+# Display the updated dataframe
+print(quartile_data)
+```
+
+```{r}
+# Saving a dataframe of these patients
+selected_data_radiomics <- quartile_data %>%
+  select(1, 2, 3, 11, 15, 26, 28)
+
+write.csv(selected_data_radiomics, "/home/evannaughton/project/additional_dataframes_if_needed/selected_quartile_data_radiomics.csv")
+```
+
+I can now specifically download the data for these cases via TCIA and carry out radiomics analysis on each using 3DSlicer and PyRadiomics.
