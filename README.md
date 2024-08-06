@@ -3,7 +3,7 @@
 ## Project Description
 
 This repository contains the code and data analysis scripts for my
-Master's project titled "characterizing the radiogenomic properties of
+Master's project titled "characterising the radiogenomic properties of
 high Ki-67 index adrenocortical carcinoma". The study involves genomic,
 radiomic, and statistical analyses to uncover significant biomarkers and
 pathways associated with aggressive adrenocortical carcinoma.
