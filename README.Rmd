@@ -1,6 +1,6 @@
-masters_project
+# masters_project
 
-Project Description
+## Project Description
 
 This repository contains the code and data analysis scripts for my
 Master's project titled "characterizing the radiogenomic properties of
